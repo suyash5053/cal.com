@@ -12,7 +12,12 @@ export type TeamInvite = {
   teamName: string;
   joinLink: string;
   isCalcomMember: boolean;
+  /**
+   * We ideally should have a separate email for auto-join(when a user is automatically accepted into a team/org), but we don't have one yet.
+   */
+  isAutoJoin: boolean;
   isOrg: boolean;
+  parentTeamName: string | undefined;
 };
 
 export default class TeamInviteEmail extends BaseEmail {
@@ -24,19 +29,23 @@ export default class TeamInviteEmail extends BaseEmail {
     this.teamInviteEvent = teamInviteEvent;
   }
 
-  protected getNodeMailerPayload(): Record<string, unknown> {
+  protected async getNodeMailerPayload(): Promise<Record<string, unknown>> {
     return {
       to: this.teamInviteEvent.to,
       from: `${APP_NAME} <${this.getMailerOptions().from}>`,
-      subject: this.teamInviteEvent.language("user_invited_you", {
-        user: this.teamInviteEvent.from,
-        team: this.teamInviteEvent.teamName,
-        appName: APP_NAME,
-        entity: this.teamInviteEvent
-          .language(this.teamInviteEvent.isOrg ? "organization" : "team")
-          .toLowerCase(),
-      }),
-      html: renderEmail("TeamInviteEmail", this.teamInviteEvent),
+      subject: this.teamInviteEvent.language(
+        `user_invited_you${this.teamInviteEvent.parentTeamName ? "_to_subteam" : ""}`,
+        {
+          user: this.teamInviteEvent.from,
+          team: this.teamInviteEvent.teamName,
+          appName: APP_NAME,
+          parentTeamName: this.teamInviteEvent.parentTeamName,
+          entity: this.teamInviteEvent
+            .language(this.teamInviteEvent.isOrg ? "organization" : "team")
+            .toLowerCase(),
+        }
+      ),
+      html: await renderEmail("TeamInviteEmail", this.teamInviteEvent),
       text: "",
     };
   }

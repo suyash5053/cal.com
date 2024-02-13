@@ -3,6 +3,7 @@ import { router } from "../../trpc";
 import { ZAppByIdInputSchema } from "./appById.schema";
 import { ZAppCredentialsByTypeInputSchema } from "./appCredentialsByType.schema";
 import { ZAwayInputSchema } from "./away.schema";
+import { ZConnectAndJoinInputSchema } from "./connectAndJoin.schema";
 import { ZConnectedCalendarsInputSchema } from "./connectedCalendars.schema";
 import { ZDeleteCredentialInputSchema } from "./deleteCredential.schema";
 import { ZDeleteMeInputSchema } from "./deleteMe.schema";
@@ -11,10 +12,15 @@ import { ZGetCalVideoRecordingsInputSchema } from "./getCalVideoRecordings.schem
 import { ZGetDownloadLinkOfCalVideoRecordingsInputSchema } from "./getDownloadLinkOfCalVideoRecordings.schema";
 import { ZIntegrationsInputSchema } from "./integrations.schema";
 import { ZLocationOptionsInputSchema } from "./locationOptions.schema";
+import { ZOutOfOfficeInputSchema, ZOutOfOfficeDelete } from "./outOfOffice.schema";
+import { me } from "./procedures/me";
+import { teamsAndUserProfilesQuery } from "./procedures/teamsAndUserProfilesQuery";
+import { ZRoutingFormOrderInputSchema } from "./routingFormOrder.schema";
 import { ZSetDestinationCalendarInputSchema } from "./setDestinationCalendar.schema";
 import { ZSubmitFeedbackInputSchema } from "./submitFeedback.schema";
 import { ZUpdateProfileInputSchema } from "./updateProfile.schema";
 import { ZUpdateUserDefaultConferencingAppInputSchema } from "./updateUserDefaultConferencingApp.schema";
+import { ZWorkflowOrderInputSchema } from "./workflowOrder.schema";
 
 type AppsRouterHandlerCache = {
   me?: typeof import("./me.handler").meHandler;
@@ -31,6 +37,8 @@ type AppsRouterHandlerCache = {
   stripeCustomer?: typeof import("./stripeCustomer.handler").stripeCustomerHandler;
   updateProfile?: typeof import("./updateProfile.handler").updateProfileHandler;
   eventTypeOrder?: typeof import("./eventTypeOrder.handler").eventTypeOrderHandler;
+  routingFormOrder?: typeof import("./routingFormOrder.handler").routingFormOrderHandler;
+  workflowOrder?: typeof import("./workflowOrder.handler").workflowOrderHandler;
   submitFeedback?: typeof import("./submitFeedback.handler").submitFeedbackHandler;
   locationOptions?: typeof import("./locationOptions.handler").locationOptionsHandler;
   deleteCredential?: typeof import("./deleteCredential.handler").deleteCredentialHandler;
@@ -40,23 +48,17 @@ type AppsRouterHandlerCache = {
   getUsersDefaultConferencingApp?: typeof import("./getUsersDefaultConferencingApp.handler").getUsersDefaultConferencingAppHandler;
   updateUserDefaultConferencingApp?: typeof import("./updateUserDefaultConferencingApp.handler").updateUserDefaultConferencingAppHandler;
   teamsAndUserProfilesQuery?: typeof import("./teamsAndUserProfilesQuery.handler").teamsAndUserProfilesQuery;
+  getUserTopBanners?: typeof import("./getUserTopBanners.handler").getUserTopBannersHandler;
+  connectAndJoin?: typeof import("./connectAndJoin.handler").Handler;
+  outOfOfficeCreate?: typeof import("./outOfOffice.handler").outOfOfficeCreate;
+  outOfOfficeEntriesList?: typeof import("./outOfOffice.handler").outOfOfficeEntriesList;
+  outOfOfficeEntryDelete?: typeof import("./outOfOffice.handler").outOfOfficeEntryDelete;
 };
 
 const UNSTABLE_HANDLER_CACHE: AppsRouterHandlerCache = {};
 
 export const loggedInViewerRouter = router({
-  me: authedProcedure.query(async ({ ctx }) => {
-    if (!UNSTABLE_HANDLER_CACHE.me) {
-      UNSTABLE_HANDLER_CACHE.me = (await import("./me.handler")).meHandler;
-    }
-
-    // Unreachable code but required for type safety
-    if (!UNSTABLE_HANDLER_CACHE.me) {
-      throw new Error("Failed to load handler");
-    }
-
-    return UNSTABLE_HANDLER_CACHE.me({ ctx });
-  }),
+  me,
 
   avatar: authedProcedure.query(async ({ ctx }) => {
     if (!UNSTABLE_HANDLER_CACHE.avatar) {
@@ -230,6 +232,34 @@ export const loggedInViewerRouter = router({
     return UNSTABLE_HANDLER_CACHE.eventTypeOrder({ ctx, input });
   }),
 
+  routingFormOrder: authedProcedure.input(ZRoutingFormOrderInputSchema).mutation(async ({ ctx, input }) => {
+    if (!UNSTABLE_HANDLER_CACHE.routingFormOrder) {
+      UNSTABLE_HANDLER_CACHE.routingFormOrder = (
+        await import("./routingFormOrder.handler")
+      ).routingFormOrderHandler;
+    }
+
+    // Unreachable code but required for type safety
+    if (!UNSTABLE_HANDLER_CACHE.routingFormOrder) {
+      throw new Error("Failed to load handler");
+    }
+
+    return UNSTABLE_HANDLER_CACHE.routingFormOrder({ ctx, input });
+  }),
+
+  workflowOrder: authedProcedure.input(ZWorkflowOrderInputSchema).mutation(async ({ ctx, input }) => {
+    if (!UNSTABLE_HANDLER_CACHE.workflowOrder) {
+      UNSTABLE_HANDLER_CACHE.workflowOrder = (await import("./workflowOrder.handler")).workflowOrderHandler;
+    }
+
+    // Unreachable code but required for type safety
+    if (!UNSTABLE_HANDLER_CACHE.workflowOrder) {
+      throw new Error("Failed to load handler");
+    }
+
+    return UNSTABLE_HANDLER_CACHE.workflowOrder({ ctx, input });
+  }),
+
   //Comment for PR: eventTypePosition is not used anywhere
   submitFeedback: authedProcedure.input(ZSubmitFeedbackInputSchema).mutation(async ({ ctx, input }) => {
     if (!UNSTABLE_HANDLER_CACHE.submitFeedback) {
@@ -308,6 +338,21 @@ export const loggedInViewerRouter = router({
       return UNSTABLE_HANDLER_CACHE.getCalVideoRecordings({ ctx, input });
     }),
 
+  getUserTopBanners: authedProcedure.query(async ({ ctx }) => {
+    if (!UNSTABLE_HANDLER_CACHE.getUserTopBanners) {
+      UNSTABLE_HANDLER_CACHE.getUserTopBanners = (
+        await import("./getUserTopBanners.handler")
+      ).getUserTopBannersHandler;
+    }
+
+    // Unreachable code but required for type safety
+    if (!UNSTABLE_HANDLER_CACHE.getUserTopBanners) {
+      throw new Error("Failed to load handler");
+    }
+
+    return UNSTABLE_HANDLER_CACHE.getUserTopBanners({ ctx });
+  }),
+
   getDownloadLinkOfCalVideoRecordings: authedProcedure
     .input(ZGetDownloadLinkOfCalVideoRecordingsInputSchema)
     .query(async ({ ctx, input }) => {
@@ -370,18 +415,57 @@ export const loggedInViewerRouter = router({
 
     return UNSTABLE_HANDLER_CACHE.shouldVerifyEmail({ ctx });
   }),
-  teamsAndUserProfilesQuery: authedProcedure.query(async ({ ctx }) => {
-    if (!UNSTABLE_HANDLER_CACHE.teamsAndUserProfilesQuery) {
-      UNSTABLE_HANDLER_CACHE.teamsAndUserProfilesQuery = (
-        await import("./teamsAndUserProfilesQuery.handler")
-      ).teamsAndUserProfilesQuery;
+  teamsAndUserProfilesQuery,
+  connectAndJoin: authedProcedure.input(ZConnectAndJoinInputSchema).mutation(async ({ ctx, input }) => {
+    if (!UNSTABLE_HANDLER_CACHE.connectAndJoin) {
+      UNSTABLE_HANDLER_CACHE.connectAndJoin = (await import("./connectAndJoin.handler")).Handler;
     }
 
     // Unreachable code but required for type safety
-    if (!UNSTABLE_HANDLER_CACHE.teamsAndUserProfilesQuery) {
+    if (!UNSTABLE_HANDLER_CACHE.connectAndJoin) {
       throw new Error("Failed to load handler");
     }
 
-    return UNSTABLE_HANDLER_CACHE.teamsAndUserProfilesQuery({ ctx });
+    return UNSTABLE_HANDLER_CACHE.connectAndJoin({ ctx, input });
+  }),
+  outOfOfficeCreate: authedProcedure.input(ZOutOfOfficeInputSchema).mutation(async ({ ctx, input }) => {
+    if (!UNSTABLE_HANDLER_CACHE.outOfOfficeCreate) {
+      UNSTABLE_HANDLER_CACHE.outOfOfficeCreate = (await import("./outOfOffice.handler")).outOfOfficeCreate;
+    }
+
+    // Unreachable code but required for type safety
+    if (!UNSTABLE_HANDLER_CACHE.outOfOfficeCreate) {
+      throw new Error("Failed to load handler");
+    }
+
+    return UNSTABLE_HANDLER_CACHE.outOfOfficeCreate({ ctx, input });
+  }),
+  outOfOfficeEntriesList: authedProcedure.query(async ({ ctx }) => {
+    if (!UNSTABLE_HANDLER_CACHE.outOfOfficeEntriesList) {
+      UNSTABLE_HANDLER_CACHE.outOfOfficeEntriesList = (
+        await import("./outOfOffice.handler")
+      ).outOfOfficeEntriesList;
+    }
+
+    // Unreachable code but required for type safety
+    if (!UNSTABLE_HANDLER_CACHE.outOfOfficeEntriesList) {
+      throw new Error("Failed to load handler");
+    }
+
+    return UNSTABLE_HANDLER_CACHE.outOfOfficeEntriesList({ ctx });
+  }),
+  outOfOfficeEntryDelete: authedProcedure.input(ZOutOfOfficeDelete).mutation(async ({ ctx, input }) => {
+    if (!UNSTABLE_HANDLER_CACHE.outOfOfficeEntryDelete) {
+      UNSTABLE_HANDLER_CACHE.outOfOfficeEntryDelete = (
+        await import("./outOfOffice.handler")
+      ).outOfOfficeEntryDelete;
+    }
+
+    // Unreachable code but required for type safety
+    if (!UNSTABLE_HANDLER_CACHE.outOfOfficeEntryDelete) {
+      throw new Error("Failed to load handler");
+    }
+
+    return UNSTABLE_HANDLER_CACHE.outOfOfficeEntryDelete({ ctx, input });
   }),
 });

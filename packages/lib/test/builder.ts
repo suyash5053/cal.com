@@ -2,6 +2,7 @@ import { faker } from "@faker-js/faker";
 import type { Booking, EventType, Prisma, Webhook } from "@prisma/client";
 import type { TFunction } from "next-i18next";
 
+import getICalUID from "@calcom/emails/lib/getICalUID";
 import { BookingStatus } from "@calcom/prisma/enums";
 import type { CalendarEvent, Person, VideoCallData } from "@calcom/types/Calendar";
 
@@ -31,9 +32,10 @@ export const buildPerson = (person?: Partial<Person>): Person => {
 };
 
 export const buildBooking = (booking?: Partial<Booking>): Booking => {
+  const uid = faker.datatype.uuid();
   return {
     id: faker.datatype.number(),
-    uid: faker.datatype.uuid(),
+    uid,
     userId: null,
     eventTypeId: null,
     title: faker.lorem.sentence(),
@@ -59,6 +61,8 @@ export const buildBooking = (booking?: Partial<Booking>): Booking => {
     metadata: null,
     responses: null,
     isRecorded: false,
+    iCalUID: getICalUID({ uid }),
+    iCalSequence: 0,
     ...booking,
   };
 };
@@ -70,6 +74,7 @@ export const buildEventType = (eventType?: Partial<EventType>): EventType => {
     slug: faker.lorem.slug(),
     description: faker.lorem.paragraph(),
     position: 1,
+    isInstantEvent: false,
     locations: null,
     length: 15,
     offsetStart: 0,
@@ -85,18 +90,22 @@ export const buildEventType = (eventType?: Partial<EventType>): EventType => {
     periodDays: null,
     periodCountCalendarDays: null,
     recurringEvent: null,
+    lockTimeZoneToggleOnBookingPage: false,
     requiresConfirmation: false,
     disableGuests: false,
     hideCalendarNotes: false,
     minimumBookingNotice: 120,
     beforeEventBuffer: 0,
     afterEventBuffer: 0,
+    onlyShowFirstAvailableSlot: false,
     seatsPerTimeSlot: null,
     seatsShowAttendees: null,
+    seatsShowAvailabilityCount: null,
     schedulingType: null,
     scheduleId: null,
     bookingLimits: null,
     durationLimits: null,
+    assignAllTeamMembers: false,
     price: 0,
     currency: "usd",
     slotInterval: null,
@@ -104,6 +113,7 @@ export const buildEventType = (eventType?: Partial<EventType>): EventType => {
     successRedirectUrl: null,
     bookingFields: [],
     parentId: null,
+    profileId: null,
     ...eventType,
   };
 };
@@ -151,9 +161,14 @@ export const buildSubscriberEvent = (booking?: Partial<Booking>) => {
   };
 };
 
-export const buildCalendarEvent = (event?: Partial<CalendarEvent>): CalendarEvent => {
+export const buildCalendarEvent = (
+  event?: Partial<CalendarEvent>,
+  omitVideoCallData?: boolean
+): CalendarEvent => {
+  const uid = faker.datatype.uuid();
   return {
-    uid: faker.datatype.uuid(),
+    uid,
+    iCalUID: getICalUID({ uid }),
     type: faker.helpers.arrayElement(["event", "meeting"]),
     title: faker.lorem.sentence(),
     startTime: faker.date.future().toISOString(),
@@ -164,7 +179,7 @@ export const buildCalendarEvent = (event?: Partial<CalendarEvent>): CalendarEven
     customInputs: {},
     additionalNotes: faker.lorem.paragraph(),
     organizer: buildPerson(),
-    videoCallData: buildVideoCallData(),
+    ...(!omitVideoCallData && { videoCallData: buildVideoCallData() }),
     ...event,
   };
 };
@@ -178,8 +193,11 @@ type UserPayload = Prisma.UserGetPayload<{
     schedules: true;
   };
 }>;
-export const buildUser = <T extends Partial<UserPayload>>(user?: T): UserPayload => {
+export const buildUser = <T extends Partial<UserPayload>>(
+  user?: T & { priority?: number }
+): UserPayload & { priority: number | null } => {
   return {
+    locked: false,
     name: faker.name.firstName(),
     email: faker.internet.email(),
     timeZone: faker.address.timeZone(),
@@ -188,7 +206,9 @@ export const buildUser = <T extends Partial<UserPayload>>(user?: T): UserPayload
     allowDynamicBooking: true,
     availability: [],
     avatar: "",
+    avatarUrl: "",
     away: false,
+    backupCodes: null,
     bio: null,
     brandColor: "#292929",
     bufferTime: 0,
@@ -207,7 +227,6 @@ export const buildUser = <T extends Partial<UserPayload>>(user?: T): UserPayload
     invitedTo: null,
     locale: "en",
     metadata: null,
-    password: null,
     role: "USER",
     schedules: [],
     selectedCalendars: [],
@@ -221,6 +240,9 @@ export const buildUser = <T extends Partial<UserPayload>>(user?: T): UserPayload
     weekStart: "",
     organizationId: null,
     allowSEOIndexing: null,
+    receiveMonthlyDigestEmail: null,
+    movedToProfileId: null,
+    priority: user?.priority ?? null,
     ...user,
   };
 };

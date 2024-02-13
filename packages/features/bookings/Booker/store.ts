@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { create } from "zustand";
 
 import dayjs from "@calcom/dayjs";
+import { BOOKER_NUMBER_OF_DAYS_TO_LOAD } from "@calcom/lib/constants";
 import { BookerLayouts } from "@calcom/prisma/zod-utils";
 
 import type { GetBookingType } from "../lib/get-booking";
@@ -27,12 +28,14 @@ type StoreInitializeType = {
   seatReferenceUid?: string;
   durationConfig?: number[] | null;
   org?: string | null;
+  isInstantMeeting?: boolean;
 };
 
 type SeatedEventData = {
   seatsPerTimeSlot?: number | null;
   attendees?: number;
   bookingUid?: string;
+  showAvailableSeatsCount?: boolean | null;
 };
 
 export type BookerStore = {
@@ -103,6 +106,11 @@ export type BookerStore = {
   occurenceCount: number | null;
   setOccurenceCount(count: number | null): void;
   /**
+   * The number of days worth of schedules to load.
+   */
+  dayCount: number | null;
+  setDayCount: (dayCount: number | null) => void;
+  /**
    * If booking is being rescheduled or it has seats, it receives a rescheduleUid or bookingUid
    * the current booking details are passed in. The `bookingData`
    * object is something that's fetched server side.
@@ -130,6 +138,8 @@ export type BookerStore = {
   org?: string | null;
   seatedEventData: SeatedEventData;
   setSeatedEventData: (seatedEventData: SeatedEventData) => void;
+
+  isInstantMeeting?: boolean;
 };
 
 /**
@@ -154,6 +164,12 @@ export const useBookerStore = create<BookerStore>((set, get) => ({
   },
   selectedDate: getQueryParam("date") || null,
   setSelectedDate: (selectedDate: string | null) => {
+    // unset selected date
+    if (!selectedDate) {
+      removeQueryParam("date");
+      return;
+    }
+
     const currentSelection = dayjs(get().selectedDate);
     const newSelection = dayjs(selectedDate);
     set({ selectedDate });
@@ -195,11 +211,16 @@ export const useBookerStore = create<BookerStore>((set, get) => ({
     updateQueryParam("month", month ?? "");
     get().setSelectedDate(null);
   },
+  dayCount: BOOKER_NUMBER_OF_DAYS_TO_LOAD > 0 ? BOOKER_NUMBER_OF_DAYS_TO_LOAD : null,
+  setDayCount: (dayCount: number | null) => {
+    set({ dayCount });
+  },
   isTeamEvent: false,
   seatedEventData: {
     seatsPerTimeSlot: undefined,
     attendees: undefined,
     bookingUid: undefined,
+    showAvailableSeatsCount: true,
   },
   setSeatedEventData: (seatedEventData: SeatedEventData) => {
     set({ seatedEventData });
@@ -217,6 +238,7 @@ export const useBookerStore = create<BookerStore>((set, get) => ({
     isTeamEvent,
     durationConfig,
     org,
+    isInstantMeeting,
   }: StoreInitializeType) => {
     const selectedDateInStore = get().selectedDate;
 
@@ -248,14 +270,12 @@ export const useBookerStore = create<BookerStore>((set, get) => ({
         (["week_view", "column_view"].includes(layout) ? dayjs().format("YYYY-MM-DD") : null),
     });
 
-    if (eventId) {
-      if (durationConfig?.includes(Number(getQueryParam("duration")))) {
-        set({
-          selectedDuration: Number(getQueryParam("duration")),
-        });
-      } else {
-        removeQueryParam("duration");
-      }
+    if (durationConfig?.includes(Number(getQueryParam("duration")))) {
+      set({
+        selectedDuration: Number(getQueryParam("duration")),
+      });
+    } else {
+      removeQueryParam("duration");
     }
 
     // Unset selected timeslot if user is rescheduling. This could happen
@@ -264,6 +284,21 @@ export const useBookerStore = create<BookerStore>((set, get) => ({
     // force clear this.
     if (rescheduleUid && bookingData) set({ selectedTimeslot: null });
     if (month) set({ month });
+
+    if (isInstantMeeting) {
+      const month = dayjs().format("YYYY-MM");
+      const selectedDate = dayjs().format("YYYY-MM-DD");
+      const selectedTimeslot = new Date().toISOString();
+      set({
+        month,
+        selectedDate,
+        selectedTimeslot,
+        isInstantMeeting,
+      });
+      updateQueryParam("month", month);
+      updateQueryParam("date", selectedDate ?? "");
+      updateQueryParam("slot", selectedTimeslot ?? "");
+    }
     //removeQueryParam("layout");
   },
   durationConfig: null,
@@ -302,6 +337,7 @@ export const useInitializeBookerStore = ({
   isTeamEvent,
   durationConfig,
   org,
+  isInstantMeeting,
 }: StoreInitializeType) => {
   const initializeStore = useBookerStore((state) => state.initialize);
   useEffect(() => {
@@ -317,6 +353,7 @@ export const useInitializeBookerStore = ({
       org,
       verifiedEmail,
       durationConfig,
+      isInstantMeeting,
     });
   }, [
     initializeStore,
@@ -331,5 +368,6 @@ export const useInitializeBookerStore = ({
     isTeamEvent,
     verifiedEmail,
     durationConfig,
+    isInstantMeeting,
   ]);
 };

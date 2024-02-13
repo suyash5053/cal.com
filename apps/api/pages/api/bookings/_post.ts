@@ -1,5 +1,6 @@
 import type { NextApiRequest } from "next";
 
+import getBookingDataSchemaForApi from "@calcom/features/bookings/lib/getBookingDataSchemaForApi";
 import handleNewBooking from "@calcom/features/bookings/lib/handleNewBooking";
 import { defaultResponder } from "@calcom/lib/server";
 
@@ -94,6 +95,9 @@ import { defaultResponder } from "@calcom/lib/server";
  *               seatsShowAttendees:
  *                 type: boolean
  *                 description: 'Share Attendee information in seats'
+ *               seatsShowAvailabilityCount:
+ *                 type: boolean
+ *                 description: 'Show the number of available seats'
  *               smsReminderNumber:
  *                 type: number
  *                 description: 'SMS reminder number'
@@ -202,8 +206,8 @@ import { defaultResponder } from "@calcom/lib/server";
 async function handler(req: NextApiRequest) {
   const { userId, isAdmin } = req;
   if (isAdmin) req.userId = req.body.userId || userId;
-  const booking = await handleNewBooking(req);
-  return booking;
+
+  return await handleNewBooking(req, getBookingDataSchemaForApi);
 }
 
 export default defaultResponder(handler);

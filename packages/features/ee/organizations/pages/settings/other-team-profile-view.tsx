@@ -1,20 +1,24 @@
+"use client";
+
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { Prisma } from "@prisma/client";
 import { useSession } from "next-auth/react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useLayoutEffect } from "react";
+import { useRouter } from "next/navigation";
+import { useState, useLayoutEffect, useEffect } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { z } from "zod";
 
 import { IS_TEAM_BILLING_ENABLED, WEBAPP_URL } from "@calcom/lib/constants";
 import { getPlaceholderAvatar } from "@calcom/lib/defaultAvatarImage";
+import { trackFormbricksAction } from "@calcom/lib/formbricks-client";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
+import { useParamsWithFallback } from "@calcom/lib/hooks/useParamsWithFallback";
 import { md } from "@calcom/lib/markdownIt";
 import { markdownToSafeHTML } from "@calcom/lib/markdownToSafeHTML";
 import objectKeys from "@calcom/lib/objectKeys";
+import slugify from "@calcom/lib/slugify";
 import turndown from "@calcom/lib/turndownService";
-import type { RouterOutputs } from "@calcom/trpc/react";
 import { trpc } from "@calcom/trpc/react";
 import { SkeletonContainer, SkeletonText } from "@calcom/ui";
 import {
@@ -35,7 +39,7 @@ import {
 import { ExternalLink, Link as LinkIcon, Trash2 } from "@calcom/ui/components/icon";
 
 import { getLayout } from "../../../../settings/layouts/SettingsLayout";
-import { extractDomainFromWebsiteUrl } from "../../../organizations/lib/utils";
+import { subdomainSuffix } from "../../../organizations/lib/orgDomains";
 
 const regex = new RegExp("^[a-zA-Z0-9-]*$");
 
@@ -75,27 +79,40 @@ const OtherTeamProfileView = () => {
   const form = useForm({
     resolver: zodResolver(teamProfileFormSchema),
   });
-  const searchParams = useSearchParams();
-  const teamId = Number(searchParams.get("id"));
-  const { data: team, isLoading } = trpc.viewer.organizations.getOtherTeam.useQuery(
+  const params = useParamsWithFallback();
+  const teamId = Number(params.id);
+  const {
+    data: team,
+    isPending,
+    error: teamError,
+  } = trpc.viewer.organizations.getOtherTeam.useQuery(
     { teamId: teamId },
     {
-      enabled: !!teamId,
-      onError: () => {
-        router.push("/settings");
-      },
-      onSuccess: (team: RouterOutputs["viewer"]["organizations"]["getOtherTeam"]) => {
-        if (team) {
-          form.setValue("name", team.name || "");
-          form.setValue("slug", team.slug || "");
-          form.setValue("logo", team.logo || "");
-          form.setValue("bio", team.bio || "");
-          if (team.slug === null && (team?.metadata as Prisma.JsonObject)?.requestedSlug) {
-            form.setValue("slug", ((team?.metadata as Prisma.JsonObject)?.requestedSlug as string) || "");
-          }
-        }
-      },
+      enabled: !Number.isNaN(teamId),
     }
+  );
+  useEffect(
+    function refactorMeWithoutEffect() {
+      if (teamError) {
+        router.push("/settings");
+      }
+    },
+    [teamError]
+  );
+
+  useEffect(
+    function refactorMeWithoutEffect() {
+      if (team) {
+        form.setValue("name", team.name || "");
+        form.setValue("slug", team.slug || "");
+        form.setValue("logo", team.logo || "");
+        form.setValue("bio", team.bio || "");
+        if (team.slug === null && (team?.metadata as Prisma.JsonObject)?.requestedSlug) {
+          form.setValue("slug", ((team?.metadata as Prisma.JsonObject)?.requestedSlug as string) || "");
+        }
+      }
+    },
+    [team]
   );
 
   // This page can only be accessed by team admins (owner/admin)
@@ -105,11 +122,12 @@ const OtherTeamProfileView = () => {
 
   const isBioEmpty = !team || !team.bio || !team.bio.replace("<p><br></p>", "").length;
 
-  const deleteTeamMutation = trpc.viewer.teams.delete.useMutation({
+  const deleteTeamMutation = trpc.viewer.organizations.deleteTeam.useMutation({
     async onSuccess() {
-      await utils.viewer.teams.list.invalidate();
+      await utils.viewer.organizations.listOtherTeams.invalidate();
       showToast(t("your_team_disbanded_successfully"), "success");
       router.push(`${WEBAPP_URL}/teams`);
+      trackFormbricksAction("team_disbanded");
     },
   });
 
@@ -153,7 +171,7 @@ const OtherTeamProfileView = () => {
   return (
     <>
       <Meta title={t("profile")} description={t("profile_team_description")} />
-      {!isLoading ? (
+      {!isPending ? (
         <>
           {isAdmin ? (
             <Form
@@ -223,13 +241,11 @@ const OtherTeamProfileView = () => {
                       label={t("team_url")}
                       value={value}
                       addOnLeading={
-                        team?.parent
-                          ? `${team.parent.slug}.${extractDomainFromWebsiteUrl}/`
-                          : `${WEBAPP_URL}/team/`
+                        team?.parent ? `${team.parent.slug}.${subdomainSuffix()}/` : `${WEBAPP_URL}/team/`
                       }
                       onChange={(e) => {
                         form.clearErrors("slug");
-                        form.setValue("slug", e?.target.value);
+                        form.setValue("slug", slugify(e?.target.value, true));
                       }}
                     />
                   </div>
@@ -247,7 +263,7 @@ const OtherTeamProfileView = () => {
                 />
               </div>
               <p className="text-default mt-2 text-sm">{t("team_description")}</p>
-              <Button color="primary" className="mt-8" type="submit" loading={mutation.isLoading}>
+              <Button color="primary" className="mt-8" type="submit" loading={mutation.isPending}>
                 {t("update")}
               </Button>
               {IS_TEAM_BILLING_ENABLED &&
@@ -310,7 +326,9 @@ const OtherTeamProfileView = () => {
               variety="danger"
               title={t("disband_team")}
               confirmBtnText={t("confirm_disband_team")}
-              onConfirm={deleteTeam}>
+              onConfirm={() => {
+                deleteTeam();
+              }}>
               {t("disband_team_confirmation_message")}
             </ConfirmationDialogContent>
           </Dialog>

@@ -1,12 +1,12 @@
-import type { Prisma, Credential } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 
 import { DailyLocationType } from "@calcom/app-store/locations";
-import { getBookingFieldsWithSystemFields } from "@calcom/features/bookings/lib/getBookingFields";
 import slugify from "@calcom/lib/slugify";
 import { PeriodType, SchedulingType } from "@calcom/prisma/enums";
 import type { userSelect } from "@calcom/prisma/selects";
 import type { CustomInputSchema } from "@calcom/prisma/zod-utils";
 import { EventTypeMetaDataSchema } from "@calcom/prisma/zod-utils";
+import type { CredentialPayload } from "@calcom/types/Credential";
 
 type User = Prisma.UserGetPayload<typeof userSelect>;
 
@@ -26,7 +26,7 @@ type UsernameSlugLinkProps = {
   slug: string;
 };
 
-const user: User & { credentials: Credential[] } = {
+const user: User & { credentials: CredentialPayload[] } = {
   metadata: null,
   theme: null,
   credentials: [],
@@ -49,7 +49,6 @@ const user: User & { credentials: Credential[] } = {
   darkBrandColor: "#efefef",
   allowDynamicBooking: true,
   timeFormat: 12,
-  organizationId: null,
 };
 
 const customInputs: CustomInputSchema[] = [];
@@ -80,11 +79,14 @@ const commons = {
   schedulingType: SchedulingType.COLLECTIVE,
   seatsPerTimeSlot: null,
   seatsShowAttendees: null,
+  seatsShowAvailabilityCount: null,
+  onlyShowFirstAvailableSlot: false,
   id: 0,
   hideCalendarNotes: false,
   recurringEvent: null,
   destinationCalendar: null,
   team: null,
+  lockTimeZoneToggleOnBookingPage: false,
   requiresConfirmation: false,
   requiresBookerEmailVerification: false,
   bookingLimits: null,
@@ -97,26 +99,20 @@ const commons = {
   users: [user],
   hosts: [],
   metadata: EventTypeMetaDataSchema.parse({}),
-  bookingFields: getBookingFieldsWithSystemFields({
-    bookingFields: [],
-    customInputs: [],
-    // Default value of disableGuests from DB.
-    disableGuests: false,
-    disableBookingTitle: false,
-    metadata: {},
-    workflows: [],
-  }),
+  bookingFields: [],
+  assignAllTeamMembers: false,
 };
 
 const dynamicEvent = {
   length: 30,
   slug: "dynamic",
-  title: "Dynamic",
-  eventName: "Dynamic Event",
-  description: "",
+  title: "Group Meeting",
+  eventName: "Group Meeting",
+  description: "Join us for a meeting with multiple people",
   descriptionAsSafeHTML: "",
   position: 0,
   ...commons,
+  metadata: EventTypeMetaDataSchema.parse({ multipleDuration: [15, 30, 60, 90] }),
 };
 
 const defaultEvents = [dynamicEvent];

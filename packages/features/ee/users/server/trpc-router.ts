@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { WEBAPP_URL } from "@calcom/lib/constants";
-import { defaultAvatarSrc } from "@calcom/lib/defaultAvatarImage";
+import { AVATAR_FALLBACK } from "@calcom/lib/constants";
 import { _UserModel as User } from "@calcom/prisma/zod";
 import type { inferRouterOutputs } from "@calcom/trpc";
 import { TRPCError } from "@calcom/trpc";
@@ -33,13 +33,16 @@ const userBodySchema = User.pick({
   avatar: true,
 });
 
+/**
+ * @deprecated in favour of @calcom/lib/getAvatarUrl
+ */
 /** This helps to prevent reaching the 4MB payload limit by avoiding base64 and instead passing the avatar url */
 export function getAvatarUrlFromUser(user: {
   avatar: string | null;
   username: string | null;
   email: string;
 }) {
-  if (!user.avatar || !user.username) return defaultAvatarSrc({ email: user.email });
+  if (!user.avatar || !user.username) return AVATAR_FALLBACK;
   return `${WEBAPP_URL}/${user.username}/avatar.png`;
 }
 
@@ -54,9 +57,9 @@ function exclude<UserType, Key extends keyof UserType>(user: UserType, keys: Key
 /** Reusable logic that checks for admin permissions and if the requested user exists */
 //const authedAdminWithUserMiddleware = middleware();
 
-const authedAdminProcedureWithRequestedUser = authedAdminProcedure.use(async ({ ctx, next, rawInput }) => {
+const authedAdminProcedureWithRequestedUser = authedAdminProcedure.use(async ({ ctx, next, getRawInput }) => {
   const { prisma } = ctx;
-  const parsed = userIdSchema.safeParse(rawInput);
+  const parsed = userIdSchema.safeParse(await getRawInput());
   if (!parsed.success) throw new TRPCError({ code: "BAD_REQUEST", message: "User id is required" });
   const { userId: id } = parsed.data;
   const user = await prisma.user.findUnique({ where: { id } });
@@ -64,9 +67,7 @@ const authedAdminProcedureWithRequestedUser = authedAdminProcedure.use(async ({ 
   return next({
     ctx: {
       user: ctx.user,
-      requestedUser:
-        /** Don't leak the password */
-        exclude(user, ["password"]),
+      requestedUser: user,
     },
   });
 });
@@ -81,8 +82,7 @@ export const userAdminRouter = router({
     // TODO: Add search, pagination, etc.
     const users = await prisma.user.findMany();
     return users.map((user) => ({
-      /** Don't leak the password */
-      ...exclude(user, ["password"]),
+      ...user,
       /**
        * FIXME: This should be either a prisma extension or middleware
        * @see https://www.prisma.io/docs/concepts/components/prisma-client/middleware

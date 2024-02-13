@@ -2,6 +2,8 @@ import type { Prisma } from "@prisma/client";
 import { useMemo } from "react";
 import type { z } from "zod";
 
+import { Price } from "@calcom/features/bookings/components/event-meta/Price";
+import { getPriceIcon } from "@calcom/features/bookings/components/event-meta/getPriceIcon";
 import { classNames, parseRecurringEvent } from "@calcom/lib";
 import getPaymentAppData from "@calcom/lib/getPaymentAppData";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
@@ -9,16 +11,15 @@ import type { baseEventTypeSelect } from "@calcom/prisma";
 import { SchedulingType } from "@calcom/prisma/enums";
 import type { EventTypeModel } from "@calcom/prisma/zod";
 import { Badge } from "@calcom/ui";
-import { Clock, Users, RefreshCw, CreditCard, Clipboard, Plus, User, Lock } from "@calcom/ui/components/icon";
+import { Clock, Users, RefreshCw, Clipboard, Plus, User, Lock } from "@calcom/ui/components/icon";
 
 export type EventTypeDescriptionProps = {
   eventType: Pick<
     z.infer<typeof EventTypeModel>,
-    Exclude<keyof typeof baseEventTypeSelect, "recurringEvent"> | "metadata"
+    Exclude<keyof typeof baseEventTypeSelect, "recurringEvent"> | "metadata" | "seatsPerTimeSlot"
   > & {
     descriptionAsSafeHTML?: string | null;
     recurringEvent: Prisma.JsonValue;
-    seatsPerTimeSlot?: number;
   };
   className?: string;
   shortenDescription?: boolean;
@@ -46,8 +47,8 @@ export const EventTypeDescription = ({
         {eventType.description && (
           <div
             className={classNames(
-              "text-subtle max-w-[280px] break-words py-1 text-sm sm:max-w-[650px] [&_a]:text-blue-500 [&_a]:underline [&_a]:hover:text-blue-600",
-              shortenDescription ? "line-clamp-4" : ""
+              "text-subtle line-clamp-3 break-words py-1 text-sm sm:max-w-[650px] [&_a]:text-blue-500 [&_a]:underline [&_a]:hover:text-blue-600",
+              shortenDescription ? "line-clamp-4 [&>*:not(:first-child)]:hidden" : ""
             )}
             dangerouslySetInnerHTML={{
               __html: eventType.descriptionAsSafeHTML || "",
@@ -84,7 +85,7 @@ export const EventTypeDescription = ({
             </Badge>
           )}
           {recurringEvent?.count && recurringEvent.count > 0 && (
-            <li className="hidden xl:block">
+            <li className="hidden xl:block" data-testid="repeat-eventtype">
               <Badge variant="gray" startIcon={RefreshCw}>
                 {t("repeats_up_to", {
                   count: recurringEvent.count,
@@ -94,16 +95,17 @@ export const EventTypeDescription = ({
           )}
           {paymentAppData.enabled && (
             <li>
-              <Badge variant="gray" startIcon={CreditCard}>
-                {new Intl.NumberFormat(i18n.language, {
-                  style: "currency",
-                  currency: paymentAppData.currency,
-                }).format(paymentAppData.price / 100)}
+              <Badge variant="gray" startIcon={getPriceIcon(paymentAppData.currency)}>
+                <Price
+                  currency={paymentAppData.currency}
+                  price={paymentAppData.price}
+                  displayAlternateSymbol={false}
+                />
               </Badge>
             </li>
           )}
           {eventType.requiresConfirmation && (
-            <li className="hidden xl:block">
+            <li className="hidden xl:block" data-testid="requires-confirmation-badge">
               <Badge variant="gray" startIcon={Clipboard}>
                 {eventType.metadata?.requiresConfirmationThreshold
                   ? t("may_require_confirmation")

@@ -3,6 +3,8 @@ const CopyWebpackPlugin = require("copy-webpack-plugin");
 const os = require("os");
 const englishTranslation = require("./public/static/locales/en/common.json");
 const { withAxiom } = require("next-axiom");
+const { withSentryConfig } = require("@sentry/nextjs");
+const { version } = require("./package.json");
 const { i18n } = require("./next-i18next.config");
 const {
   orgHostPath,
@@ -13,14 +15,18 @@ const {
 
 if (!process.env.NEXTAUTH_SECRET) throw new Error("Please set NEXTAUTH_SECRET");
 if (!process.env.CALENDSO_ENCRYPTION_KEY) throw new Error("Please set CALENDSO_ENCRYPTION_KEY");
+const isOrganizationsEnabled =
+  process.env.ORGANIZATIONS_ENABLED === "1" || process.env.ORGANIZATIONS_ENABLED === "true";
+// To be able to use the version in the app without having to import package.json
+process.env.NEXT_PUBLIC_CALCOM_VERSION = version;
 
 // So we can test deploy previews preview
 if (process.env.VERCEL_URL && !process.env.NEXT_PUBLIC_WEBAPP_URL) {
-  process.env.NEXT_PUBLIC_WEBAPP_URL = "https://" + process.env.VERCEL_URL;
+  process.env.NEXT_PUBLIC_WEBAPP_URL = `https://${process.env.VERCEL_URL}`;
 }
 // Check for configuration of NEXTAUTH_URL before overriding
 if (!process.env.NEXTAUTH_URL && process.env.NEXT_PUBLIC_WEBAPP_URL) {
-  process.env.NEXTAUTH_URL = process.env.NEXT_PUBLIC_WEBAPP_URL + "/api/auth";
+  process.env.NEXTAUTH_URL = `${process.env.NEXT_PUBLIC_WEBAPP_URL}/api/auth`;
 }
 if (!process.env.NEXT_PUBLIC_WEBSITE_URL) {
   process.env.NEXT_PUBLIC_WEBSITE_URL = process.env.NEXT_PUBLIC_WEBAPP_URL;
@@ -65,13 +71,21 @@ if (process.env.GOOGLE_API_CREDENTIALS && !validJson(process.env.GOOGLE_API_CRED
 }
 
 const informAboutDuplicateTranslations = () => {
-  const valueSet = new Set();
+  const valueMap = {};
 
   for (const key in englishTranslation) {
-    if (valueSet.has(englishTranslation[key])) {
-      console.warn("\x1b[33mDuplicate value found in:", "\x1b[0m", key);
+    const value = englishTranslation[key];
+
+    if (valueMap[value]) {
+      console.warn(
+        "\x1b[33mDuplicate value found in common.json keys:",
+        "\x1b[0m ",
+        key,
+        "and",
+        valueMap[value]
+      );
     } else {
-      valueSet.add(englishTranslation[key]);
+      valueMap[value] = key;
     }
   }
 };
@@ -87,6 +101,7 @@ if (process.env.ANALYZE === "true") {
 }
 
 plugins.push(withAxiom);
+
 const matcherConfigRootPath = {
   has: [
     {
@@ -95,6 +110,16 @@ const matcherConfigRootPath = {
     },
   ],
   source: "/",
+};
+
+const matcherConfigRootPathEmbed = {
+  has: [
+    {
+      type: "host",
+      value: orgHostPath,
+    },
+  ],
+  source: "/embed",
 };
 
 const matcherConfigUserRoute = {
@@ -129,11 +154,15 @@ const matcherConfigUserTypeEmbedRoute = {
 
 /** @type {import("next").NextConfig} */
 const nextConfig = {
+  experimental: {
+    // externalize server-side node_modules with size > 1mb, to improve dev mode performance/RAM usage
+    serverComponentsExternalPackages: ["next-i18next"],
+  },
   i18n: {
     ...i18n,
     localeDetection: false,
   },
-  productionBrowserSourceMaps: true,
+  productionBrowserSourceMaps: false,
   /* We already do type check on GH actions */
   typescript: {
     ignoreBuildErrors: !!process.env.CI,
@@ -178,7 +207,17 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  webpack: (config, { webpack, buildId }) => {
+  webpack: (config, { webpack, buildId, isServer }) => {
+    if (isServer) {
+      // Module not found fix @see https://github.com/boxyhq/jackson/issues/1535#issuecomment-1704381612
+      config.plugins.push(
+        new webpack.IgnorePlugin({
+          resourceRegExp:
+            /(^@google-cloud\/spanner|^@mongodb-js\/zstd|^@sap\/hana-client\/extension\/Stream$|^@sap\/hana-client|^@sap\/hana-client$|^aws-crt|^aws4$|^better-sqlite3$|^bson-ext$|^cardinal$|^cloudflare:sockets$|^hdb-pool$|^ioredis$|^kerberos$|^mongodb-client-encryption$|^mysql$|^oracledb$|^pg-native$|^pg-query-stream$|^react-native-sqlite-storage$|^snappy\/package\.json$|^snappy$|^sql.js$|^sqlite3$|^typeorm-aurora-data-api-driver$)/,
+        })
+      );
+    }
+
     config.plugins.push(
       new CopyWebpackPlugin({
         patterns: [
@@ -206,6 +245,9 @@ const nextConfig = {
       ...config.resolve.fallback, // if you miss it, all the other options in fallback, specified
       // by next.js will be dropped. Doesn't make much sense, but how it is
       fs: false,
+      // ignore module resolve errors caused by the server component bundler
+      "pg-native": false,
+      "superagent-proxy": false,
     };
 
     /**
@@ -221,12 +263,28 @@ const nextConfig = {
   },
   async rewrites() {
     const beforeFiles = [
+      {
+        /**
+         * Needed due to the introduction of dotted usernames
+         * @see https://github.com/calcom/cal.com/pull/11706
+         */
+        source: "/embed.js",
+        destination: "/embed/embed.js",
+      },
+      {
+        source: "/login",
+        destination: "/auth/login",
+      },
       // These rewrites are other than booking pages rewrites and so that they aren't redirected to org pages ensure that they happen in beforeFiles
-      ...(process.env.ORGANIZATIONS_ENABLED
+      ...(isOrganizationsEnabled
         ? [
             {
               ...matcherConfigRootPath,
-              destination: "/team/:orgSlug",
+              destination: "/team/:orgSlug?isOrgProfile=1",
+            },
+            {
+              ...matcherConfigRootPathEmbed,
+              destination: "/team/:orgSlug/embed?isOrgProfile=1",
             },
             {
               ...matcherConfigUserRoute,
@@ -248,6 +306,10 @@ const nextConfig = {
       {
         source: "/org/:slug",
         destination: "/team/:slug",
+      },
+      {
+        source: "/org/:orgSlug/avatar.png",
+        destination: "/api/user/avatar?orgSlug=:orgSlug",
       },
       {
         source: "/team/:teamname/avatar.png",
@@ -329,44 +391,46 @@ const nextConfig = {
           },
         ],
       },
-      ...[
-        {
-          ...matcherConfigRootPath,
-          headers: [
+      ...(isOrganizationsEnabled
+        ? [
             {
-              key: "X-Cal-Org-path",
-              value: "/team/:orgSlug",
+              ...matcherConfigRootPath,
+              headers: [
+                {
+                  key: "X-Cal-Org-path",
+                  value: "/team/:orgSlug",
+                },
+              ],
             },
-          ],
-        },
-        {
-          ...matcherConfigUserRoute,
-          headers: [
             {
-              key: "X-Cal-Org-path",
-              value: "/org/:orgSlug/:user",
+              ...matcherConfigUserRoute,
+              headers: [
+                {
+                  key: "X-Cal-Org-path",
+                  value: "/org/:orgSlug/:user",
+                },
+              ],
             },
-          ],
-        },
-        {
-          ...matcherConfigUserTypeRoute,
-          headers: [
             {
-              key: "X-Cal-Org-path",
-              value: "/org/:orgSlug/:user/:type",
+              ...matcherConfigUserTypeRoute,
+              headers: [
+                {
+                  key: "X-Cal-Org-path",
+                  value: "/org/:orgSlug/:user/:type",
+                },
+              ],
             },
-          ],
-        },
-        {
-          ...matcherConfigUserTypeEmbedRoute,
-          headers: [
             {
-              key: "X-Cal-Org-path",
-              value: "/org/:orgSlug/:user/:type/embed",
+              ...matcherConfigUserTypeEmbedRoute,
+              headers: [
+                {
+                  key: "X-Cal-Org-path",
+                  value: "/org/:orgSlug/:user/:type/embed",
+                },
+              ],
             },
-          ],
-        },
-      ],
+          ]
+        : []),
     ];
   },
   async redirects() {
@@ -443,6 +507,13 @@ const nextConfig = {
       },
       {
         source: "/support",
+        missing: [
+          {
+            type: "header",
+            key: "host",
+            value: orgHostPath,
+          },
+        ],
         destination: "/event-types?openIntercom=true",
         permanent: true,
       },
@@ -456,10 +527,15 @@ const nextConfig = {
         destination: "/apps/installed/conferencing",
         permanent: true,
       },
+      {
+        source: "/apps/installed",
+        destination: "/apps/installed/calendar",
+        permanent: true,
+      },
       // OAuth callbacks when sent to localhost:3000(w would be expected) should be redirected to corresponding to WEBAPP_URL
       ...(process.env.NODE_ENV === "development" &&
       // Safer to enable the redirect only when the user is opting to test out organizations
-      process.env.ORGANIZATIONS_ENABLED &&
+      isOrganizationsEnabled &&
       // Prevent infinite redirect by checking that we aren't already on localhost
       process.env.NEXT_PUBLIC_WEBAPP_URL !== "http://localhost:3000"
         ? [
@@ -502,5 +578,16 @@ const nextConfig = {
     return redirects;
   },
 };
+
+if (!!process.env.NEXT_PUBLIC_SENTRY_DSN) {
+  nextConfig["sentry"] = {
+    autoInstrumentServerFunctions: true,
+    hideSourceMaps: true,
+    // disable source map generation for the server code
+    disableServerWebpackPlugin: !!process.env.SENTRY_DISABLE_SERVER_WEBPACK_PLUGIN,
+  };
+
+  plugins.push(withSentryConfig);
+}
 
 module.exports = () => plugins.reduce((acc, next) => next(acc), nextConfig);

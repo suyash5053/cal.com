@@ -1,13 +1,13 @@
-import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import type { NextApiResponse, GetServerSidePropsContext } from "next";
 
-import { stripeDataSchema } from "@calcom/app-store/stripepayment/lib/server";
+import type { appDataSchemas } from "@calcom/app-store/apps.schemas.generated";
 import updateChildrenEventTypes from "@calcom/features/ee/managed-event-types/lib/handleChildrenEventTypes";
 import { validateIntervalLimitOrder } from "@calcom/lib";
 import logger from "@calcom/lib/logger";
 import { getTranslation } from "@calcom/lib/server";
 import { validateBookerLayouts } from "@calcom/lib/validateBookerLayouts";
+import type { PrismaClient } from "@calcom/prisma";
 import { WorkflowActions, WorkflowTriggerEvents } from "@calcom/prisma/client";
 import { SchedulingType } from "@calcom/prisma/enums";
 
@@ -39,6 +39,7 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     recurringEvent,
     users,
     children,
+    assignAllTeamMembers,
     hosts,
     id,
     hashedLink,
@@ -65,9 +66,33 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
       },
       team: {
         select: {
-          name: true,
           id: true,
+          name: true,
+          slug: true,
           parentId: true,
+          parent: {
+            select: {
+              slug: true,
+            },
+          },
+          members: {
+            select: {
+              role: true,
+              accepted: true,
+              user: {
+                select: {
+                  name: true,
+                  id: true,
+                  email: true,
+                  eventTypes: {
+                    select: {
+                      slug: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -196,10 +221,14 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     }
     data.hosts = {
       deleteMany: {},
-      create: hosts.map((host) => ({
-        ...host,
-        isFixed: data.schedulingType === SchedulingType.COLLECTIVE || host.isFixed,
-      })),
+      create: hosts.map((host) => {
+        const { ...rest } = host;
+        return {
+          ...rest,
+          isFixed: data.schedulingType === SchedulingType.COLLECTIVE || host.isFixed,
+          priority: host.priority ?? 2, // default to medium priority
+        };
+      }),
     };
   }
 
@@ -241,24 +270,13 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     }
   }
 
-  if (input?.price || input.metadata?.apps?.stripe?.price) {
-    data.price = input.price || input.metadata?.apps?.stripe?.price;
-    const paymentCredential = await ctx.prisma.credential.findFirst({
-      where: {
-        userId: ctx.user.id,
-        type: {
-          contains: "_payment",
-        },
-      },
-      select: {
-        type: true,
-        key: true,
-      },
-    });
-
-    if (paymentCredential?.type === "stripe_payment") {
-      const { default_currency } = stripeDataSchema.parse(paymentCredential.key);
-      data.currency = default_currency;
+  for (const appKey in input.metadata?.apps) {
+    const app = input.metadata?.apps[appKey as keyof typeof appDataSchemas];
+    // There should only be one enabled payment app in the metadata
+    if (app.enabled && app.price && app.currency) {
+      data.price = app.price;
+      data.currency = app.currency;
+      break;
     }
   }
 
@@ -301,6 +319,8 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     }
   }
 
+  data.assignAllTeamMembers = assignAllTeamMembers ?? false;
+
   const updatedEventTypeSelect = Prisma.validator<Prisma.EventTypeSelect>()({
     slug: true,
     schedulingType: true,
@@ -331,8 +351,10 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     connectedLink,
     updatedEventType,
     children,
+    profileId: ctx.user.profile.id,
     prisma: ctx.prisma,
   });
+
   const res = ctx.res as NextApiResponse;
   if (typeof res?.revalidate !== "undefined") {
     try {

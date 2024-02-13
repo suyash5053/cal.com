@@ -107,7 +107,7 @@ export default function ApiKeyDialogForm({
                 : `${t("expires")} ${apiKeyDetails?.expiresAt?.toLocaleDateString()}`}
             </span>
           </div>
-          <DialogFooter showDivider className="!mt-12">
+          <DialogFooter showDivider className="relative">
             <Button type="button" color="secondary" onClick={handleClose} tabIndex={-1}>
               {t("done")}
             </Button>
@@ -202,14 +202,16 @@ export default function ApiKeyDialogForm({
                   );
                 }}
               />
-              <span className="text-subtle mt-2 text-xs">
-                {t("api_key_expires_on")}
-                <span className="font-bold"> {dayjs(expiryDate).format("DD-MM-YYYY")}</span>
-              </span>
+              {!watchNeverExpires && (
+                <span className="text-subtle mt-2 text-xs">
+                  {t("api_key_expires_on")}
+                  <span className="font-bold"> {dayjs(expiryDate).format("DD-MM-YYYY")}</span>
+                </span>
+              )}
             </div>
           )}
 
-          <DialogFooter showDivider className="!mt-12">
+          <DialogFooter showDivider className="relative">
             <Button type="button" color="secondary" onClick={handleClose} tabIndex={-1}>
               {t("cancel")}
             </Button>

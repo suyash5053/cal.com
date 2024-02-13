@@ -1,17 +1,24 @@
-import crypto from "crypto";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { z } from "zod";
 
-import { getSlugOrRequestedSlug, orgDomainConfig } from "@calcom/features/ee/organizations/lib/orgDomains";
+import {
+  orgDomainConfig,
+  whereClauseForOrgWithSlugOrRequestedSlug,
+} from "@calcom/features/ee/organizations/lib/orgDomains";
+import { AVATAR_FALLBACK } from "@calcom/lib/constants";
 import { getPlaceholderAvatar } from "@calcom/lib/defaultAvatarImage";
+import logger from "@calcom/lib/logger";
 import prisma from "@calcom/prisma";
 
-import { defaultAvatarSrc } from "@lib/profile";
-
+const log = logger.getSubLogger({ prefix: ["team/[slug]"] });
 const querySchema = z
   .object({
     username: z.string(),
     teamname: z.string(),
+    /**
+     * Passed when we want to fetch avatar of a particular organization
+     */
+    orgSlug: z.string(),
     /**
      * Allow fetching avatar of a particular organization
      * Avatars being public, we need not worry about others accessing it.
@@ -21,8 +28,8 @@ const querySchema = z
   .partial();
 
 async function getIdentityData(req: NextApiRequest) {
-  const { username, teamname, orgId } = querySchema.parse(req.query);
-  const { currentOrgDomain, isValidOrgDomain } = orgDomainConfig(req.headers.host ?? "");
+  const { username, teamname, orgId, orgSlug } = querySchema.parse(req.query);
+  const { currentOrgDomain, isValidOrgDomain } = orgDomainConfig(req);
 
   const org = isValidOrgDomain ? currentOrgDomain : null;
 
@@ -31,17 +38,34 @@ async function getIdentityData(req: NextApiRequest) {
         id: orgId,
       }
     : org
-    ? getSlugOrRequestedSlug(org)
+    ? whereClauseForOrgWithSlugOrRequestedSlug(org)
     : null;
 
   if (username) {
-    const user = await prisma.user.findFirst({
+    const users = await prisma.user.findMany({
       where: {
-        username,
-        organization: orgQuery,
+        ...(orgQuery
+          ? {
+              profiles: {
+                some: {
+                  username,
+                  organization: orgQuery,
+                },
+              },
+            }
+          : {
+              username,
+              // If a user is moved, it isn't actually available outside of the organization. So, for non-org domain check for movedToProfileId
+              movedToProfileId: null,
+            }),
       },
       select: { avatar: true, email: true },
     });
+
+    if (users.length > 1) {
+      throw new Error(`More than one user found for username "${username}"`);
+    }
+    const [user] = users;
     return {
       name: username,
       email: user?.email,
@@ -49,6 +73,7 @@ async function getIdentityData(req: NextApiRequest) {
       org,
     };
   }
+
   if (teamname) {
     const team = await prisma.team.findFirst({
       where: {
@@ -57,11 +82,38 @@ async function getIdentityData(req: NextApiRequest) {
       },
       select: { logo: true },
     });
+
     return {
       org,
       name: teamname,
       email: null,
-      avatar: team?.logo || getPlaceholderAvatar(null, teamname),
+      avatar: getPlaceholderAvatar(team?.logo, teamname),
+    };
+  }
+
+  if (orgSlug) {
+    const orgs = await prisma.team.findMany({
+      where: {
+        ...whereClauseForOrgWithSlugOrRequestedSlug(orgSlug),
+      },
+      select: {
+        slug: true,
+        logo: true,
+        name: true,
+      },
+    });
+
+    if (orgs.length > 1) {
+      // This should never happen, but instead of throwing error, we are just logging to be able to observe when it happens.
+      log.error("More than one organization found for slug", orgSlug);
+    }
+
+    const org = orgs[0];
+    return {
+      org: org?.slug,
+      name: org?.name,
+      email: null,
+      avatar: getPlaceholderAvatar(org?.logo, org?.name),
     };
   }
 }
@@ -75,12 +127,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.setHeader("x-cal-org", identity.org);
     }
     res.writeHead(302, {
-      Location: defaultAvatarSrc({
-        md5: crypto
-          .createHash("md5")
-          .update(identity?.email || "guest@example.com")
-          .digest("hex"),
-      }),
+      Location: AVATAR_FALLBACK,
     });
 
     return res.end();

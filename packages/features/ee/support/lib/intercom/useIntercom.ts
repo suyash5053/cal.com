@@ -1,9 +1,10 @@
+// eslint-disable-next-line no-restricted-imports
 import { noop } from "lodash";
 import { useIntercom as useIntercomLib } from "react-use-intercom";
 import { z } from "zod";
 
 import dayjs from "@calcom/dayjs";
-import { CAL_URL } from "@calcom/lib/constants";
+import { WEBSITE_URL } from "@calcom/lib/constants";
 import { useHasTeamPlan, useHasPaidPlan } from "@calcom/lib/hooks/useHasPaidPlan";
 import { trpc } from "@calcom/trpc/react";
 
@@ -43,7 +44,7 @@ export const useIntercom = () => {
       customAttributes: {
         //keys should be snake cased
         user_name: data?.username,
-        link: CAL_URL + "/" + data?.username,
+        link: `${WEBSITE_URL}/${data?.username}`,
         identity_provider: data?.identityProvider,
         timezone: data?.timeZone,
         locale: data?.locale,

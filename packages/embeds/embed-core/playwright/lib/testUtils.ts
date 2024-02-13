@@ -1,6 +1,7 @@
 import type { Page, Frame } from "@playwright/test";
 import { test, expect } from "@playwright/test";
 
+// eslint-disable-next-line no-restricted-imports
 import prisma from "@calcom/prisma";
 
 export function todo(title: string) {
@@ -55,9 +56,13 @@ export const getEmbedIframe = async ({
             clearInterval(interval);
             resolve(true);
           } else {
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore
-            console.log("Iframe Status:", !!iframe, !!iframe?.contentWindow, window.iframeReady);
+            console.log("Waiting for all three to be true:", {
+              iframeElement: iframe,
+              contentWindow: iframe?.contentWindow,
+              // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+              // @ts-ignore
+              iframeReady: window.iframeReady,
+            });
           }
         }, 500);
 
@@ -79,10 +84,10 @@ export const getEmbedIframe = async ({
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
   const embedIframe = page.frame(`cal-embed=${calNamespace}`)!;
   const u = new URL(embedIframe.url());
-  if (u.pathname === pathname + "/embed") {
+  if (u.pathname === `${pathname}/embed`) {
     return embedIframe;
   }
-  console.log('Embed iframe url pathname match. Expected: "' + pathname + '/embed"', "Actual: " + u.pathname);
+  console.log(`Embed iframe url pathname match. Expected: "${pathname}/embed"`, `Actual: ${u.pathname}`);
   return null;
 };
 
@@ -152,4 +157,11 @@ export async function rescheduleEvent(username: string, frame: Frame, page: Page
   // Make sure we're navigated to the success page
   await expect(frame.locator("[data-testid=success-page]")).toBeVisible();
   return booking;
+}
+
+export async function installAppleCalendar(page: Page) {
+  await page.goto("/apps/categories/calendar");
+  await page.click('[data-testid="app-store-app-card-apple-calendar"]');
+  await page.waitForURL("/apps/apple-calendar");
+  await page.click('[data-testid="install-app-button"]');
 }

@@ -1,3 +1,4 @@
+import type { TFunction } from "next-i18next";
 import { useEffect } from "react";
 
 import { useBookerStore } from "@calcom/features/bookings/Booker/store";
@@ -7,11 +8,37 @@ import { Badge } from "@calcom/ui";
 
 import type { PublicEvent } from "../../types";
 
+/** Render X mins as X hours or X hours Y mins instead of in minutes once >= 60 minutes */
+const getDurationFormatted = (mins: number, t: TFunction) => {
+  const hours = Math.floor(mins / 60);
+  mins %= 60;
+  // format minutes string
+  let minStr = "";
+  if (mins > 0) {
+    minStr =
+      mins === 1
+        ? t("minute_one", { count: 1 })
+        : t("multiple_duration_timeUnit", { count: mins, unit: "minute" });
+  }
+  // format hours string
+  let hourStr = "";
+  if (hours > 0) {
+    hourStr =
+      hours === 1
+        ? t("hour_one", { count: 1 })
+        : t("multiple_duration_timeUnit", { count: hours, unit: "hour" });
+  }
+
+  if (hourStr && minStr) return `${hourStr} ${minStr}`;
+  return hourStr || minStr;
+};
+
 export const EventDuration = ({ event }: { event: PublicEvent }) => {
   const { t } = useLocale();
-  const [selectedDuration, setSelectedDuration] = useBookerStore((state) => [
+  const [selectedDuration, setSelectedDuration, state] = useBookerStore((state) => [
     state.selectedDuration,
     state.setSelectedDuration,
+    state.state,
   ]);
 
   const isDynamicEvent = "isDynamic" in event && event.isDynamic;
@@ -24,20 +51,24 @@ export const EventDuration = ({ event }: { event: PublicEvent }) => {
   }, [selectedDuration, setSelectedDuration, event.metadata?.multipleDuration, event.length, isDynamicEvent]);
 
   if (!event?.metadata?.multipleDuration && !isDynamicEvent)
-    return <>{t("multiple_duration_mins", { count: event.length })}</>;
+    return <>{getDurationFormatted(event.length, t)}</>;
 
-  const durations = event?.metadata?.multipleDuration || [15, 30, 60];
+  const durations = event?.metadata?.multipleDuration || [15, 30, 60, 90];
 
   return (
     <div className="flex flex-wrap gap-2">
-      {durations.map((duration) => (
-        <Badge
-          variant="gray"
-          className={classNames(selectedDuration === duration && "bg-brand-default text-brand")}
-          size="md"
-          key={duration}
-          onClick={() => setSelectedDuration(duration)}>{`${duration} ${t("minute_timeUnit")}`}</Badge>
-      ))}
+      {durations
+        .filter((dur) => state !== "booking" || dur === selectedDuration)
+        .map((duration) => (
+          <Badge
+            variant="gray"
+            className={classNames(selectedDuration === duration && "bg-brand-default text-brand")}
+            size="md"
+            key={duration}
+            onClick={() => setSelectedDuration(duration)}>
+            {getDurationFormatted(duration, t)}
+          </Badge>
+        ))}
     </div>
   );
 };

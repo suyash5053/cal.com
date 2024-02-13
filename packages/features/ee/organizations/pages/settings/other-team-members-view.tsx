@@ -1,31 +1,39 @@
+"use client";
+
 // import { debounce } from "lodash";
-import { useSearchParams, useRouter } from "next/navigation";
+import { keepPreviousData } from "@tanstack/react-query";
+import { useSession } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 
 import MemberInvitationModal from "@calcom/ee/teams/components/MemberInvitationModal";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
+import { useParamsWithFallback } from "@calcom/lib/hooks/useParamsWithFallback";
+import { MembershipRole } from "@calcom/prisma/enums";
 import { trpc } from "@calcom/trpc/react";
 import type { RouterOutputs } from "@calcom/trpc/react";
-import { Meta, showToast } from "@calcom/ui";
+import { Meta, showToast, Button } from "@calcom/ui";
+import { Plus } from "@calcom/ui/components/icon";
 
 import { getLayout } from "../../../../settings/layouts/SettingsLayout";
 import MakeTeamPrivateSwitch from "../../../teams/components/MakeTeamPrivateSwitch";
 import MemberListItem from "../components/MemberListItem";
 
-type Members = RouterOutputs["viewer"]["organizations"]["listOtherTeamMembers"];
+type Members = RouterOutputs["viewer"]["organizations"]["listOtherTeamMembers"]["rows"];
 type Team = RouterOutputs["viewer"]["organizations"]["getOtherTeam"];
 
 interface MembersListProps {
   members: Members | undefined;
   team: Team | undefined;
-  offset: number;
-  setOffset: (offset: number) => void;
-  displayLoadMore: boolean;
+  fetchNextPage: () => void;
+  hasNextPage: boolean | undefined;
+  isFetchingNextPage: boolean | undefined;
 }
 
 function MembersList(props: MembersListProps) {
   const { t } = useLocale();
-  const { displayLoadMore, members, team } = props;
+  const { hasNextPage, members = [], team, fetchNextPage, isFetchingNextPage } = props;
+
   return (
     <div className="flex flex-col gap-y-3">
       {members?.length && team ? (
@@ -35,13 +43,20 @@ function MembersList(props: MembersListProps) {
           })}
         </ul>
       ) : null}
-      {displayLoadMore && (
-        <button
-          className="text-primary-500 hover:text-primary-600"
-          onClick={() => props.setOffset(props.offset + 1)}>
-          {t("load_more")}
-        </button>
+      {members?.length === 0 && (
+        <div className="flex flex-col items-center justify-center">
+          <p className="text-default text-sm font-bold">{t("no_members_found")}</p>
+        </div>
       )}
+      <div className="text-default p-4 text-center">
+        <Button
+          color="minimal"
+          loading={isFetchingNextPage}
+          disabled={!hasNextPage}
+          onClick={() => fetchNextPage()}>
+          {hasNextPage ? t("load_more_results") : t("no_more_results")}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -49,80 +64,99 @@ function MembersList(props: MembersListProps) {
 const MembersView = () => {
   const { t, i18n } = useLocale();
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const teamId = Number(searchParams.get("id"));
-
+  const params = useParamsWithFallback();
+  const teamId = Number(params.id);
+  const session = useSession();
   const utils = trpc.useContext();
-  const [offset, setOffset] = useState<number>(1);
   // const [query, setQuery] = useState<string | undefined>("");
   // const [queryToFetch, setQueryToFetch] = useState<string | undefined>("");
-  const [loadMore, setLoadMore] = useState<boolean>(true);
-  const limit = 100;
+  const limit = 20;
   const [showMemberInvitationModal, setShowMemberInvitationModal] = useState<boolean>(false);
-  const [members, setMembers] = useState<Members>([]);
-  const { data: team, isLoading: isTeamLoading } = trpc.viewer.organizations.getOtherTeam.useQuery(
+
+  const { data: currentOrg } = trpc.viewer.organizations.listCurrent.useQuery(undefined, {
+    enabled: !!session.data?.user?.org,
+  });
+  const {
+    data: team,
+    isPending: isTeamLoading,
+    error: otherTeamError,
+  } = trpc.viewer.organizations.getOtherTeam.useQuery(
     { teamId },
     {
-      onError: () => {
-        router.push("/settings");
-      },
+      enabled: !Number.isNaN(teamId),
     }
   );
-  const { data: membersFetch, isLoading: isLoadingMembers } =
-    trpc.viewer.organizations.listOtherTeamMembers.useQuery(
-      { teamId, limit, offset: (offset - 1) * limit },
+  const { data: orgMembersNotInThisTeam, isPending: isOrgListLoading } =
+    trpc.viewer.organizations.getMembers.useQuery(
       {
-        onError: () => {
-          router.push("/settings");
-        },
+        teamIdToExclude: teamId,
+        distinctUser: true,
+      },
+      {
+        enabled: !Number.isNaN(teamId),
       }
     );
 
-  useEffect(() => {
-    if (membersFetch) {
-      if (membersFetch.length < limit) {
-        setLoadMore(false);
-      } else {
-        setLoadMore(true);
-      }
-      setMembers(members.concat(membersFetch));
+  const {
+    fetchNextPage,
+    isFetchingNextPage,
+    hasNextPage,
+    error: otherMembersError,
+    data,
+  } = trpc.viewer.organizations.listOtherTeamMembers.useInfiniteQuery(
+    { teamId, limit },
+    {
+      enabled: !Number.isNaN(teamId),
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+      placeholderData: keepPreviousData,
     }
-  }, [membersFetch]);
+  );
 
-  // useEffect(() => {
-  //   if (queryToFetch !== "") {
-  //     setMembers(membersFetch || []);
-  //     setLoadMore(false);
-  //   }
-  // }, [membersFetch, query]);
+  useEffect(
+    function refactorMeWithoutEffect() {
+      if (otherMembersError || otherTeamError) {
+        router.push("/settings");
+      }
+    },
+    [router, otherMembersError, otherTeamError]
+  );
 
-  const isLoading = isTeamLoading || isLoadingMembers;
+  const isPending = isTeamLoading || isOrgListLoading;
+  const inviteMemberMutation = trpc.viewer.teams.inviteMember.useMutation({
+    onSuccess: () => {
+      utils.viewer.organizations.getMembers.invalidate();
+      utils.viewer.organizations.listOtherTeams.invalidate();
+      utils.viewer.teams.list.invalidate();
+      utils.viewer.organizations.listOtherTeamMembers.invalidate();
+    },
+  });
 
-  const inviteMemberMutation = trpc.viewer.teams.inviteMember.useMutation();
-
-  // const debouncedFunction = debounce((query) => {
-  //   setQueryToFetch(query);
-  // }, 500);
+  const isOrgAdminOrOwner =
+    currentOrg &&
+    (currentOrg.user.role === MembershipRole.OWNER || currentOrg.user.role === MembershipRole.ADMIN);
 
   return (
     <>
       <Meta
         title={t("team_members")}
         description={t("members_team_description")}
-        // @TODO: Add this back in when we have the ability to invite members
-        // CTA={
-        //   <Button
-        //     type="button"
-        //     color="primary"
-        //     StartIcon={Plus}
-        //     className="ml-auto"
-        //     onClick={() => setShowMemberInvitationModal(true)}
-        //     data-testid="new-member-button">
-        //     {t("add")}
-        //   </Button>
-        // }
+        CTA={
+          isOrgAdminOrOwner ? (
+            <Button
+              type="button"
+              color="primary"
+              StartIcon={Plus}
+              className="ml-auto"
+              onClick={() => setShowMemberInvitationModal(true)}
+              data-testid="new-member-button">
+              {t("add")}
+            </Button>
+          ) : (
+            <></>
+          )
+        }
       />
-      {!isLoading && (
+      {!isPending && (
         <>
           <div>
             <>
@@ -138,25 +172,31 @@ const MembersView = () => {
                 placeholder={`${t("search")}...`}
               /> */}
               <MembersList
-                members={members}
+                members={data?.pages?.flatMap((page) => page.rows) ?? []}
                 team={team}
-                setOffset={setOffset}
-                offset={offset}
-                displayLoadMore={loadMore}
+                fetchNextPage={fetchNextPage}
+                hasNextPage={hasNextPage}
+                isFetchingNextPage={isFetchingNextPage}
               />
             </>
 
             {team && (
               <>
                 <hr className="border-subtle my-8" />
-                <MakeTeamPrivateSwitch teamId={team.id} isPrivate={team.isPrivate} disabled={false} />
+                <MakeTeamPrivateSwitch
+                  teamId={team.id}
+                  isPrivate={team.isPrivate}
+                  disabled={false}
+                  isOrg={false}
+                />
               </>
             )}
           </div>
           {showMemberInvitationModal && team && (
             <MemberInvitationModal
-              isLoading={inviteMemberMutation.isLoading}
+              isPending={inviteMemberMutation.isPending}
               isOpen={showMemberInvitationModal}
+              orgMembers={orgMembersNotInThisTeam}
               teamId={team.id}
               disableCopyLink={true}
               onExit={() => setShowMemberInvitationModal(false)}
@@ -167,29 +207,27 @@ const MembersView = () => {
                     language: i18n.language,
                     role: values.role,
                     usernameOrEmail: values.emailOrUsername,
-                    sendEmailInvitation: values.sendInviteEmail,
                   },
                   {
                     onSuccess: async (data) => {
                       await utils.viewer.teams.get.invalidate();
                       setShowMemberInvitationModal(false);
-                      if (data.sendEmailInvitation) {
-                        if (Array.isArray(data.usernameOrEmail)) {
-                          showToast(
-                            t("email_invite_team_bulk", {
-                              userCount: data.usernameOrEmail.length,
-                            }),
-                            "success"
-                          );
-                          resetFields();
-                        } else {
-                          showToast(
-                            t("email_invite_team", {
-                              email: data.usernameOrEmail,
-                            }),
-                            "success"
-                          );
-                        }
+
+                      if (Array.isArray(data.usernameOrEmail)) {
+                        showToast(
+                          t("email_invite_team_bulk", {
+                            userCount: data.usernameOrEmail.length,
+                          }),
+                          "success"
+                        );
+                        resetFields();
+                      } else {
+                        showToast(
+                          t("email_invite_team", {
+                            email: data.usernameOrEmail,
+                          }),
+                          "success"
+                        );
                       }
                     },
                     onError: (error) => {

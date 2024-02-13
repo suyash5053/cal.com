@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { useLocale } from "@calcom/lib/hooks/useLocale";
+import { trackFormbricksAction } from "@calcom/lib/formbricks-client";
 import type { RouterOutputs } from "@calcom/trpc/react";
 import { trpc } from "@calcom/trpc/react";
 import { showToast } from "@calcom/ui";
@@ -15,8 +15,6 @@ interface Props {
 export default function OtherTeamList(props: Props) {
   const utils = trpc.useContext();
 
-  const { t } = useLocale();
-
   const [hideDropdown, setHideDropdown] = useState(false);
 
   function selectAction(action: string, teamId: number) {
@@ -27,10 +25,10 @@ export default function OtherTeamList(props: Props) {
     }
   }
 
-  const deleteTeamMutation = trpc.viewer.teams.delete.useMutation({
+  const deleteTeamMutation = trpc.viewer.organizations.deleteTeam.useMutation({
     async onSuccess() {
-      await utils.viewer.teams.list.invalidate();
-      await utils.viewer.teams.hasTeamPlan.invalidate();
+      await utils.viewer.organizations.listOtherTeams.invalidate();
+      trackFormbricksAction("team_disbanded");
     },
     async onError(err) {
       showToast(err.message, "error");
@@ -48,7 +46,7 @@ export default function OtherTeamList(props: Props) {
           key={team?.id as number}
           team={team}
           onActionSelect={(action: string) => selectAction(action, team?.id as number)}
-          isLoading={deleteTeamMutation.isLoading}
+          isPending={deleteTeamMutation.isPending}
           hideDropdown={hideDropdown}
           setHideDropdown={setHideDropdown}
         />

@@ -37,7 +37,7 @@ export default function EmptyScreen(props: { isFilteredView: boolean }) {
 
   const createMutation = trpc.viewer.workflows.create.useMutation({
     onSuccess: async ({ workflow }) => {
-      await router.replace("/workflows/" + workflow.id);
+      await router.replace(`/workflows/${workflow.id}`);
     },
     onError: (err) => {
       if (err instanceof HttpError) {
@@ -82,7 +82,7 @@ export default function EmptyScreen(props: { isFilteredView: boolean }) {
               subtitle={t("new_workflow_subtitle").toUpperCase()}
               createFunction={(teamId?: number) => createMutation.mutate({ teamId })}
               buttonText={t("create_workflow")}
-              isLoading={createMutation.isLoading}
+              isPending={createMutation.isPending}
             />
           </div>
         </div>

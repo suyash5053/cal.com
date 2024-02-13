@@ -2,7 +2,7 @@ import { useAutoAnimate } from "@formkit/auto-animate/react";
 import type { Props } from "react-select";
 
 import { classNames } from "@calcom/lib";
-import { CAL_URL } from "@calcom/lib/constants";
+import { WEBSITE_URL } from "@calcom/lib/constants";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { MembershipRole } from "@calcom/prisma/enums";
 import { Avatar, Badge, Button, ButtonGroup, Select, Switch, Tooltip } from "@calcom/ui";
@@ -13,6 +13,7 @@ export type ChildrenEventType = {
   label: string;
   created: boolean;
   owner: {
+    avatar: string;
     id: number;
     email: string;
     name: string;
@@ -34,7 +35,6 @@ export const ChildrenEventTypeSelect = ({
   onChange: (value: readonly ChildrenEventType[]) => void;
 }) => {
   const { t } = useLocale();
-
   const [animationRef] = useAutoAnimate<HTMLUListElement>();
 
   return (
@@ -61,7 +61,7 @@ export const ChildrenEventTypeSelect = ({
               <Avatar
                 size="mdLg"
                 className="overflow-visible"
-                imageSrc={`${CAL_URL}/${children.owner.username}/avatar.png`}
+                imageSrc={children.owner.avatar}
                 alt={children.owner.name || children.owner.email || ""}
               />
               <div className="flex w-full flex-row justify-between">
@@ -102,10 +102,11 @@ export const ChildrenEventTypeSelect = ({
                     {children.created && children.owner.username && (
                       <Tooltip content={t("preview")}>
                         <Button
+                          data-testid="preview-button"
                           color="secondary"
                           target="_blank"
                           variant="icon"
-                          href={`${CAL_URL}/${children.owner?.username}/${children.slug}`}
+                          href={`${WEBSITE_URL}/${children.owner?.username}/${children.slug}`}
                           StartIcon={ExternalLink}
                         />
                       </Tooltip>

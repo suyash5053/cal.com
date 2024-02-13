@@ -1,4 +1,5 @@
-import type { Prisma, UserPermissionRole } from "@prisma/client";
+import type { Membership, Team, User } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { uuid } from "short-uuid";
 import type z from "zod";
 
@@ -7,130 +8,14 @@ import googleMeetMeta from "@calcom/app-store/googlevideo/_metadata";
 import zoomMeta from "@calcom/app-store/zoomvideo/_metadata";
 import dayjs from "@calcom/dayjs";
 import { hashPassword } from "@calcom/features/auth/lib/hashPassword";
-import { DEFAULT_SCHEDULE, getAvailabilityFromSchedule } from "@calcom/lib/availability";
 import { BookingStatus, MembershipRole } from "@calcom/prisma/enums";
+import type { Ensure } from "@calcom/types/utils";
 
 import prisma from ".";
 import mainAppStore from "./seed-app-store";
+import mainHugeEventTypesSeed from "./seed-huge-event-types";
+import { createUserAndEventType } from "./seed-utils";
 import type { teamMetadataSchema } from "./zod-utils";
-
-async function createUserAndEventType({
-  user,
-  eventTypes = [],
-}: {
-  user: {
-    email: string;
-    password: string;
-    username: string;
-    name: string;
-    completedOnboarding?: boolean;
-    timeZone?: string;
-    role?: UserPermissionRole;
-    theme?: "dark" | "light";
-  };
-  eventTypes?: Array<
-    Prisma.EventTypeUncheckedCreateInput & {
-      _bookings?: Prisma.BookingCreateInput[];
-    }
-  >;
-}) {
-  const userData = {
-    ...user,
-    password: await hashPassword(user.password),
-    emailVerified: new Date(),
-    completedOnboarding: user.completedOnboarding ?? true,
-    locale: "en",
-    schedules:
-      user.completedOnboarding ?? true
-        ? {
-            create: {
-              name: "Working Hours",
-              availability: {
-                createMany: {
-                  data: getAvailabilityFromSchedule(DEFAULT_SCHEDULE),
-                },
-              },
-            },
-          }
-        : undefined,
-  };
-
-  const theUser = await prisma.user.upsert({
-    where: { email_username: { email: user.email, username: user.username } },
-    update: userData,
-    create: userData,
-  });
-
-  console.log(
-    `👤 Upserted '${user.username}' with email "${user.email}" & password "${user.password}". Booking page 👉 ${process.env.NEXT_PUBLIC_WEBAPP_URL}/${user.username}`
-  );
-
-  for (const eventTypeInput of eventTypes) {
-    const { _bookings: bookingFields = [], ...eventTypeData } = eventTypeInput;
-    eventTypeData.userId = theUser.id;
-    eventTypeData.users = { connect: { id: theUser.id } };
-
-    const eventType = await prisma.eventType.findFirst({
-      where: {
-        slug: eventTypeData.slug,
-        users: {
-          some: {
-            id: eventTypeData.userId,
-          },
-        },
-      },
-      select: {
-        id: true,
-      },
-    });
-
-    if (eventType) {
-      console.log(
-        `\t📆 Event type ${eventTypeData.slug} already seems seeded - ${process.env.NEXT_PUBLIC_WEBAPP_URL}/${user.username}/${eventTypeData.slug}`
-      );
-      continue;
-    }
-    const { id } = await prisma.eventType.create({
-      data: eventTypeData,
-    });
-
-    console.log(
-      `\t📆 Event type ${eventTypeData.slug} with id ${id}, length ${eventTypeData.length}min - ${process.env.NEXT_PUBLIC_WEBAPP_URL}/${user.username}/${eventTypeData.slug}`
-    );
-    for (const bookingInput of bookingFields) {
-      await prisma.booking.create({
-        data: {
-          ...bookingInput,
-          user: {
-            connect: {
-              email: user.email,
-            },
-          },
-          attendees: {
-            create: {
-              email: user.email,
-              name: user.name,
-              timeZone: "Europe/London",
-            },
-          },
-          eventType: {
-            connect: {
-              id,
-            },
-          },
-          status: bookingInput.status,
-        },
-      });
-      console.log(
-        `\t\t☎️ Created booking ${bookingInput.title} at ${new Date(
-          bookingInput.startTime
-        ).toLocaleDateString()}`
-      );
-    }
-  }
-
-  return theUser;
-}
 
 async function createTeamAndAddUsers(
   teamInput: Prisma.TeamCreateInput,
@@ -194,6 +79,275 @@ async function createTeamAndAddUsers(
   return team;
 }
 
+async function createOrganizationAndAddMembersAndTeams({
+  org: { orgData, members: orgMembers },
+  teams,
+  usersOutsideOrg,
+}: {
+  org: {
+    orgData: Ensure<Partial<Prisma.TeamCreateInput>, "name" | "slug">;
+    members: {
+      memberData: Ensure<Partial<Prisma.UserCreateInput>, "username" | "name" | "email" | "password">;
+      orgMembership: Partial<Membership>;
+      orgProfile: {
+        username: string;
+      };
+      inTeams: { slug: string; role: MembershipRole }[];
+    }[];
+  };
+  teams: {
+    teamData: Omit<Ensure<Partial<Prisma.TeamCreateInput>, "name" | "slug">, "members">;
+    nonOrgMembers: Ensure<Partial<Prisma.UserCreateInput>, "username" | "name" | "email" | "password">[];
+  }[];
+  usersOutsideOrg: {
+    name: string;
+    username: string;
+    email: string;
+  }[];
+}) {
+  console.log(`\n🏢 Creating organization "${orgData.name}"`);
+  const orgMembersInDb: (User & {
+    inTeams: { slug: string; role: MembershipRole }[];
+    orgMembership: Partial<Membership>;
+    orgProfile: {
+      username: string;
+    };
+  })[] = [];
+
+  // Create all users first
+  try {
+    for (const member of orgMembers) {
+      const orgMemberInDb = {
+        ...(await prisma.user.create({
+          data: {
+            ...member.memberData,
+            emailVerified: new Date(),
+            password: {
+              create: {
+                hash: await hashPassword(member.memberData.password.create?.hash || ""),
+              },
+            },
+          },
+        })),
+        inTeams: member.inTeams,
+        orgMembership: member.orgMembership,
+        orgProfile: member.orgProfile,
+      };
+
+      orgMembersInDb.push(orgMemberInDb);
+    }
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError) {
+      if (e.code === "P2002") {
+        console.log(`One of the organization members already exists, skipping the entire seeding`);
+        return;
+      }
+    }
+  }
+
+  await Promise.all([
+    usersOutsideOrg.map(async (user) => {
+      return await prisma.user.create({
+        data: {
+          username: user.username,
+          name: user.name,
+          email: user.email,
+          emailVerified: new Date(),
+          password: {
+            create: {
+              hash: await hashPassword(user.username),
+            },
+          },
+        },
+      });
+    }),
+  ]);
+
+  // Create organization with those users as members
+  const orgInDb = await prisma.team.create({
+    data: {
+      ...orgData,
+      metadata: {
+        ...(orgData.metadata && typeof orgData.metadata === "object" ? orgData.metadata : {}),
+        isOrganization: true,
+      },
+      orgProfiles: {
+        create: orgMembersInDb.map((member) => ({
+          uid: uuid(),
+          username: member.orgProfile.username,
+          user: {
+            connect: {
+              id: member.id,
+            },
+          },
+        })),
+      },
+      members: {
+        create: orgMembersInDb.map((member) => ({
+          user: {
+            connect: {
+              id: member.id,
+            },
+          },
+          role: member.orgMembership.role || "MEMBER",
+          accepted: member.orgMembership.accepted,
+        })),
+      },
+    },
+    select: {
+      id: true,
+      members: true,
+      orgProfiles: true,
+    },
+  });
+
+  const orgMembersInDBWithProfileId = await Promise.all(
+    orgMembersInDb.map(async (member) => ({
+      ...member,
+      profile: {
+        ...member.orgProfile,
+        id: orgInDb.orgProfiles.find((p) => p.userId === member.id)?.id,
+      },
+    }))
+  );
+
+  // For each member create one event
+  for (const member of orgMembersInDBWithProfileId) {
+    await prisma.eventType.create({
+      data: {
+        title: `${member.name} Event`,
+        slug: `${member.username}-event`,
+        length: 15,
+        owner: {
+          connect: {
+            id: member.id,
+          },
+        },
+        profile: {
+          connect: {
+            id: member.profile.id,
+          },
+        },
+        users: {
+          connect: {
+            id: member.id,
+          },
+        },
+      },
+    });
+
+    // Create schedule for every member
+    await prisma.schedule.create({
+      data: {
+        name: "Working Hours",
+        userId: member.id,
+        availability: {
+          create: {
+            days: [1, 2, 3, 4, 5],
+            startTime: "1970-01-01T09:00:00.000Z",
+            endTime: "1970-01-01T17:00:00.000Z",
+          },
+        },
+      },
+    });
+  }
+
+  const organizationTeams: Team[] = [];
+
+  // Create all the teams in the organization
+  for (let teamIndex = 0; teamIndex < teams.length; teamIndex++) {
+    const nonOrgMembers: User[] = [];
+    const team = teams[teamIndex];
+    for (const nonOrgMember of team.nonOrgMembers) {
+      nonOrgMembers.push(
+        await prisma.user.create({
+          data: {
+            ...nonOrgMember,
+            password: {
+              create: {
+                hash: await hashPassword(nonOrgMember.username),
+              },
+            },
+            emailVerified: new Date(),
+          },
+        })
+      );
+    }
+    organizationTeams.push(
+      await prisma.team.create({
+        data: {
+          ...team.teamData,
+          parent: {
+            connect: {
+              id: orgInDb.id,
+            },
+          },
+          metadata: team.teamData.metadata || {},
+          members: {
+            create: nonOrgMembers.map((member) => ({
+              user: {
+                connect: {
+                  id: member.id,
+                },
+              },
+              role: "MEMBER",
+              accepted: true,
+            })),
+          },
+        },
+      })
+    );
+
+    const ownerForEvent = orgMembersInDBWithProfileId[0];
+    // Create event for each team
+    await prisma.eventType.create({
+      data: {
+        title: `${team.teamData.name} Event1`,
+        slug: `${team.teamData.slug}-event-1`,
+        length: 15,
+        team: {
+          connect: {
+            id: organizationTeams[teamIndex].id,
+          },
+        },
+        owner: {
+          connect: {
+            id: ownerForEvent.id,
+          },
+        },
+        profile: {
+          connect: {
+            id: ownerForEvent.profile.id,
+          },
+        },
+        users: {
+          connect: {
+            id: ownerForEvent.id,
+          },
+        },
+      },
+    });
+  }
+
+  // Create memberships for all the organization members with the respective teams
+  for (const member of orgMembersInDBWithProfileId) {
+    for (const { slug: teamSlug, role: role } of member.inTeams) {
+      const team = organizationTeams.find((t) => t.slug === teamSlug);
+      if (!team) {
+        throw Error(`Team with slug ${teamSlug} not found`);
+      }
+      await prisma.membership.create({
+        data: {
+          teamId: team.id,
+          userId: member.id,
+          role: role,
+          accepted: true,
+        },
+      });
+    }
+  }
+}
+
 async function main() {
   await createUserAndEventType({
     user: {
@@ -235,6 +389,7 @@ async function main() {
       },
     ],
   });
+
   await createUserAndEventType({
     user: {
       email: "pro@example.com",
@@ -574,6 +729,33 @@ async function main() {
     },
   });
 
+  if (!!(process.env.E2E_TEST_CALCOM_QA_EMAIL && process.env.E2E_TEST_CALCOM_QA_PASSWORD)) {
+    await createUserAndEventType({
+      user: {
+        email: process.env.E2E_TEST_CALCOM_QA_EMAIL || "qa@example.com",
+        password: process.env.E2E_TEST_CALCOM_QA_PASSWORD || "qa",
+        username: "qa",
+        name: "QA Example",
+      },
+      eventTypes: [
+        {
+          title: "15min",
+          slug: "15min",
+          length: 15,
+        },
+      ],
+      credentials: [
+        !!process.env.E2E_TEST_CALCOM_QA_GCAL_CREDENTIALS
+          ? {
+              type: "google_calendar",
+              key: JSON.parse(process.env.E2E_TEST_CALCOM_QA_GCAL_CREDENTIALS) as Prisma.JsonObject,
+              appId: "google-calendar",
+            }
+          : null,
+      ],
+    });
+  }
+
   await createTeamAndAddUsers(
     {
       name: "Seeded Team",
@@ -622,10 +804,145 @@ async function main() {
       },
     ]
   );
+
+  await createOrganizationAndAddMembersAndTeams({
+    org: {
+      orgData: {
+        name: "Acme Inc",
+        slug: "acme",
+        metadata: {
+          isOrganizationVerified: true,
+          orgAutoAcceptEmail: "acme.com",
+        },
+      },
+      members: [
+        {
+          memberData: {
+            email: "owner1-acme@example.com",
+            password: {
+              create: {
+                hash: "owner1-acme",
+              },
+            },
+            username: "owner1-acme",
+            name: "Owner 1",
+          },
+          orgMembership: {
+            role: "OWNER",
+            accepted: true,
+          },
+          orgProfile: {
+            username: "owner1",
+          },
+          inTeams: [
+            {
+              slug: "team1",
+              role: "ADMIN",
+            },
+          ],
+        },
+      ],
+    },
+    teams: [
+      {
+        teamData: {
+          name: "Team 1",
+          slug: "team1",
+        },
+        nonOrgMembers: [
+          {
+            email: "non-acme-member-1@example.com",
+            password: {
+              create: {
+                hash: "non-acme-member-1",
+              },
+            },
+            username: "non-acme-member-1",
+            name: "NonAcme Member1",
+          },
+        ],
+      },
+    ],
+    usersOutsideOrg: [
+      {
+        name: "Jane Doe",
+        email: "jane@acme.com",
+        username: "jane-outside-org",
+      },
+    ],
+  });
+
+  await createOrganizationAndAddMembersAndTeams({
+    org: {
+      orgData: {
+        name: "Dunder Mifflin",
+        slug: "dunder-mifflin",
+        metadata: {
+          isOrganizationVerified: true,
+          orgAutoAcceptEmail: "dunder-mifflin.com",
+        },
+      },
+      members: [
+        {
+          memberData: {
+            email: "owner1-dunder@example.com",
+            password: {
+              create: {
+                hash: "owner1-dunder",
+              },
+            },
+            username: "owner1-dunder",
+            name: "Owner 1",
+          },
+          orgMembership: {
+            role: "OWNER",
+            accepted: true,
+          },
+          orgProfile: {
+            username: "owner1",
+          },
+          inTeams: [
+            {
+              slug: "team1",
+              role: "ADMIN",
+            },
+          ],
+        },
+      ],
+    },
+    teams: [
+      {
+        teamData: {
+          name: "Team 1",
+          slug: "team1",
+        },
+        nonOrgMembers: [
+          {
+            email: "non-dunder-member-1@example.com",
+            password: {
+              create: {
+                hash: "non-dunder-member-1",
+              },
+            },
+            username: "non-dunder-member-1",
+            name: "NonDunder Member1",
+          },
+        ],
+      },
+    ],
+    usersOutsideOrg: [
+      {
+        name: "John Doe",
+        email: "john@dunder-mifflin.com",
+        username: "john-outside-org",
+      },
+    ],
+  });
 }
 
 main()
   .then(() => mainAppStore())
+  .then(() => mainHugeEventTypesSeed())
   .catch((e) => {
     console.error(e);
     process.exit(1);

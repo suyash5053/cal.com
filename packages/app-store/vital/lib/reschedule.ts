@@ -57,8 +57,6 @@ const Reschedule = async (bookingUid: string, cancellationReason: string) => {
     const event = await prisma.eventType.findFirstOrThrow({
       select: {
         title: true,
-        users: true,
-        schedulingType: true,
       },
       where: {
         id: bookingToReschedule.eventTypeId,
@@ -121,18 +119,21 @@ const Reschedule = async (bookingUid: string, cancellationReason: string) => {
     const bookingRefsFiltered: BookingReference[] = bookingToReschedule.references.filter(
       (ref) => !!credentialsMap.get(ref.type)
     );
+
+    const promises = bookingRefsFiltered.map(async (bookingRef) => {
+      if (!bookingRef.uid) return;
+
+      if (bookingRef.type.endsWith("_calendar")) {
+        const calendar = await getCalendar(credentialsMap.get(bookingRef.type));
+        return calendar?.deleteEvent(bookingRef.uid, builder.calendarEvent);
+      } else if (bookingRef.type.endsWith("_video")) {
+        return deleteMeeting(credentialsMap.get(bookingRef.type), bookingRef.uid);
+      }
+    });
     try {
-      bookingRefsFiltered.forEach(async (bookingRef) => {
-        if (bookingRef.uid) {
-          if (bookingRef.type.endsWith("_calendar")) {
-            const calendar = await getCalendar(credentialsMap.get(bookingRef.type));
-            return calendar?.deleteEvent(bookingRef.uid, builder.calendarEvent);
-          } else if (bookingRef.type.endsWith("_video")) {
-            return deleteMeeting(credentialsMap.get(bookingRef.type), bookingRef.uid);
-          }
-        }
-      });
+      await Promise.all(promises);
     } catch (error) {
+      // FIXME: error logging - non-Error type errors are currently discarded
       if (error instanceof Error) {
         logger.error(error.message);
       }

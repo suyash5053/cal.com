@@ -60,6 +60,7 @@ export const FAKE_DAILY_CREDENTIAL: CredentialPayload & { invalid: boolean } = {
   type: "daily_video",
   key: { apikey: process.env.DAILY_API_KEY },
   userId: 0,
+  user: { email: "" },
   appId: "daily-video",
   invalid: false,
   teamId: null,
@@ -70,7 +71,7 @@ export const fetcher = async (endpoint: string, init?: RequestInit | undefined) 
   return fetch(`https://api.daily.co/v1${endpoint}`, {
     method: "GET",
     headers: {
-      Authorization: "Bearer " + api_key,
+      Authorization: `Bearer ${api_key}`,
       "Content-Type": "application/json",
       ...init?.headers,
     },
@@ -144,6 +145,35 @@ const DailyVideoApiAdapter = (): VideoApiAdapter => {
     };
   };
 
+  async function createInstantMeeting(endTime: string) {
+    // added a 1 hour buffer for room expiration
+    const exp = Math.round(new Date(endTime).getTime() / 1000) + 60 * 60;
+
+    const body = {
+      privacy: "public",
+      properties: {
+        enable_prejoin_ui: true,
+        enable_knocking: true,
+        enable_screenshare: true,
+        enable_chat: true,
+        exp: exp,
+        enable_recording: "cloud",
+      },
+    };
+
+    const dailyEvent = await postToDailyAPI("/rooms", body).then(dailyReturnTypeSchema.parse);
+    const meetingToken = await postToDailyAPI("/meeting-tokens", {
+      properties: { room_name: dailyEvent.name, exp: dailyEvent.config.exp, is_owner: true },
+    }).then(meetingTokenSchema.parse);
+
+    return Promise.resolve({
+      type: "daily_video",
+      id: dailyEvent.name,
+      password: meetingToken.token,
+      url: dailyEvent.url,
+    });
+  }
+
   return {
     /** Daily doesn't need to return busy times, so we return empty */
     getAvailability: () => {
@@ -167,9 +197,10 @@ const DailyVideoApiAdapter = (): VideoApiAdapter => {
         throw new Error("Something went wrong! Unable to get recording");
       }
     },
+    createInstantCalVideoRoom: (endTime: string) => createInstantMeeting(endTime),
     getRecordingDownloadLink: async (recordingId: string): Promise<GetAccessLinkResponseSchema> => {
       try {
-        const res = await fetcher(`/recordings/${recordingId}/access-link?valid_for_secs=172800`).then(
+        const res = await fetcher(`/recordings/${recordingId}/access-link?valid_for_secs=43200`).then(
           getAccessLinkResponseSchema.parse
         );
         return Promise.resolve(res);

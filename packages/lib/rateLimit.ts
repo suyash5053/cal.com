@@ -4,11 +4,16 @@ import { Redis } from "@upstash/redis";
 import { isIpInBanListString } from "./getIP";
 import logger from "./logger";
 
-const log = logger.getChildLogger({ prefix: ["RateLimit"] });
+const log = logger.getSubLogger({ prefix: ["RateLimit"] });
 
 export type RateLimitHelper = {
-  rateLimitingType?: "core" | "forcedSlowMode" | "common";
+  rateLimitingType?: "core" | "forcedSlowMode" | "common" | "api" | "ai";
   identifier: string;
+  /**
+   * Using a callback instead of a regular return to provide headers even
+   * when the rate limit is reached and an error is thrown.
+   **/
+  onRateLimiterResponse?: (response: RatelimitResponse) => void;
 };
 
 export type RatelimitResponse = {
@@ -41,6 +46,8 @@ function logOnce(message: string) {
   warningDisplayed = true;
 }
 
+export const API_KEY_RATE_LIMIT = 10;
+
 export function rateLimiter() {
   const UPSATCH_ENV_FOUND = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -68,6 +75,18 @@ export function rateLimiter() {
       analytics: true,
       prefix: "ratelimit:slowmode",
       limiter: Ratelimit.fixedWindow(1, "30s"),
+    }),
+    api: new Ratelimit({
+      redis,
+      analytics: true,
+      prefix: "ratelimit:api",
+      limiter: Ratelimit.fixedWindow(API_KEY_RATE_LIMIT, "60s"),
+    }),
+    ai: new Ratelimit({
+      redis,
+      analytics: true,
+      prefix: "ratelimit",
+      limiter: Ratelimit.fixedWindow(20, "1d"),
     }),
   };
 

@@ -1,4 +1,5 @@
 import classNames from "classnames";
+// eslint-disable-next-line no-restricted-imports
 import { debounce, noop } from "lodash";
 import { useSession } from "next-auth/react";
 import type { RefCallback } from "react";
@@ -24,7 +25,7 @@ interface ICustomUsernameProps {
 
 const UsernameTextfield = (props: ICustomUsernameProps & Partial<React.ComponentProps<typeof TextField>>) => {
   const { t } = useLocale();
-  const { data: session, update } = useSession();
+  const { update } = useSession();
 
   const {
     currentUsername,
@@ -43,7 +44,8 @@ const UsernameTextfield = (props: ICustomUsernameProps & Partial<React.Component
   const debouncedApiCall = useMemo(
     () =>
       debounce(async (username) => {
-        const { data } = await fetchUsername(username);
+        // TODO: Support orgSlug
+        const { data } = await fetchUsername(username, null);
         setMarkAsError(!data.available);
         setUsernameIsAvailable(data.available);
       }, 150),
@@ -65,8 +67,6 @@ const UsernameTextfield = (props: ICustomUsernameProps & Partial<React.Component
     }
   }, [inputUsernameValue, debouncedApiCall, currentUsername]);
 
-  const utils = trpc.useContext();
-
   const updateUsernameMutation = trpc.viewer.updateProfile.useMutation({
     onSuccess: async () => {
       onSuccessMutation && (await onSuccessMutation());
@@ -77,14 +77,11 @@ const UsernameTextfield = (props: ICustomUsernameProps & Partial<React.Component
     onError: (error) => {
       onErrorMutation && onErrorMutation(error);
     },
-    async onSettled() {
-      await utils.viewer.public.i18n.invalidate();
-    },
   });
 
   const ActionButtons = () => {
     return usernameIsAvailable && currentUsername !== inputUsernameValue ? (
-      <div className="me-2 ms-2 flex flex-row space-x-2">
+      <div className="relative bottom-[6px] me-2 ms-2 flex flex-row space-x-2">
         <Button
           type="button"
           onClick={() => setOpenDialogSaveUsername(true)}
@@ -140,7 +137,7 @@ const UsernameTextfield = (props: ICustomUsernameProps & Partial<React.Component
           {currentUsername !== inputUsernameValue && (
             <div className="absolute right-[2px] top-6 flex flex-row">
               <span className={classNames("mx-2 py-3.5")}>
-                {usernameIsAvailable ? <Check className="h-4 w-4" /> : <></>}
+                {usernameIsAvailable ? <Check className="relative bottom-[6px] h-4 w-4" /> : <></>}
               </span>
             </div>
           )}
@@ -180,7 +177,7 @@ const UsernameTextfield = (props: ICustomUsernameProps & Partial<React.Component
           <DialogFooter className="mt-4">
             <Button
               type="button"
-              loading={updateUsernameMutation.isLoading}
+              loading={updateUsernameMutation.isPending}
               data-testid="save-username"
               onClick={updateUsername}>
               {t("save")}

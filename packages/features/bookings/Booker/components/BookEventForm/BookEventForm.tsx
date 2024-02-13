@@ -1,312 +1,69 @@
-import { zodResolver } from "@hookform/resolvers/zod";
-import type { UseMutationResult } from "@tanstack/react-query";
-import { useMutation } from "@tanstack/react-query";
-import { useSession } from "next-auth/react";
 import type { TFunction } from "next-i18next";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Trans } from "next-i18next";
+import Link from "next/link";
+import { useState, useMemo } from "react";
 import type { FieldError } from "react-hook-form";
-import { useForm } from "react-hook-form";
-import { z } from "zod";
 
-import type { EventLocationType } from "@calcom/app-store/locations";
-import { createPaymentLink } from "@calcom/app-store/stripepayment/lib/client";
-import dayjs from "@calcom/dayjs";
-import { VerifyCodeDialog } from "@calcom/features/bookings/components/VerifyCodeDialog";
-import {
-  createBooking,
-  createRecurringBooking,
-  mapBookingToMutationInput,
-  mapRecurringBookingToMutationInput,
-  useTimePreferences,
-} from "@calcom/features/bookings/lib";
-import { getBookingFieldsWithSystemFields } from "@calcom/features/bookings/lib/getBookingFields";
-import getBookingResponsesSchema, {
-  getBookingResponsesPartialSchema,
-} from "@calcom/features/bookings/lib/getBookingResponsesSchema";
-import { getFullName } from "@calcom/features/form-builder/utils";
-import { useBookingSuccessRedirect } from "@calcom/lib/bookingSuccessRedirect";
-import { MINUTES_TO_BOOK } from "@calcom/lib/constants";
+import { WEBSITE_URL } from "@calcom/lib/constants";
+import getPaymentAppData from "@calcom/lib/getPaymentAppData";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { useRouterQuery } from "@calcom/lib/hooks/useRouterQuery";
-import { HttpError } from "@calcom/lib/http-error";
-import { trpc } from "@calcom/trpc";
-import { Alert, Button, EmptyScreen, Form, showToast } from "@calcom/ui";
+import { Alert, Button, EmptyScreen, Form } from "@calcom/ui";
 import { Calendar } from "@calcom/ui/components/icon";
 
 import { useBookerStore } from "../../store";
-import { useEvent } from "../../utils/event";
+import type { useEventReturnType } from "../../utils/event";
+import type { useBookingFormReturnType } from "../hooks/useBookingForm";
+import type { IUseBookingErrors, IUseBookingLoadingStates } from "../hooks/useBookings";
 import { BookingFields } from "./BookingFields";
 import { FormSkeleton } from "./Skeleton";
 
 type BookEventFormProps = {
   onCancel?: () => void;
+  onSubmit: () => void;
+  errorRef: React.RefObject<HTMLDivElement>;
+  errors: useBookingFormReturnType["errors"] & IUseBookingErrors;
+  loadingStates: IUseBookingLoadingStates;
+  children?: React.ReactNode;
+  bookingForm: useBookingFormReturnType["bookingForm"];
+  renderConfirmNotVerifyEmailButtonCond: boolean;
 };
 
-export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
-  const searchParams = useSearchParams();
+export const BookEventForm = ({
+  onCancel,
+  eventQuery,
+  rescheduleUid,
+  onSubmit,
+  errorRef,
+  errors,
+  loadingStates,
+  renderConfirmNotVerifyEmailButtonCond,
+  bookingForm,
+  children,
+}: Omit<BookEventFormProps, "event"> & {
+  eventQuery: useEventReturnType;
+  rescheduleUid: string | null;
+}) => {
+  const eventType = eventQuery.data;
   const routerQuery = useRouterQuery();
-  const session = useSession();
-  const bookingSuccessRedirect = useBookingSuccessRedirect();
-  const reserveSlotMutation = trpc.viewer.public.slots.reserveSlot.useMutation({
-    trpc: { context: { skipBatch: true } },
-  });
-  const removeSelectedSlot = trpc.viewer.public.slots.removeSelectedSlotMark.useMutation({
-    trpc: { context: { skipBatch: true } },
-  });
-  const router = useRouter();
-  const { t, i18n } = useLocale();
-  const { timezone } = useTimePreferences();
-  const errorRef = useRef<HTMLDivElement>(null);
-  const rescheduleUid = useBookerStore((state) => state.rescheduleUid);
-  const bookingData = useBookerStore((state) => state.bookingData);
-  const eventSlug = useBookerStore((state) => state.eventSlug);
-  const duration = useBookerStore((state) => state.selectedDuration);
-  const timeslot = useBookerStore((state) => state.selectedTimeslot);
-  const recurringEventCount = useBookerStore((state) => state.recurringEventCount);
-  const username = useBookerStore((state) => state.username);
-  const formValues = useBookerStore((state) => state.formValues);
   const setFormValues = useBookerStore((state) => state.setFormValues);
-  const seatedEventData = useBookerStore((state) => state.seatedEventData);
-  const verifiedEmail = useBookerStore((state) => state.verifiedEmail);
-  const setVerifiedEmail = useBookerStore((state) => state.setVerifiedEmail);
-  const isRescheduling = !!rescheduleUid && !!bookingData;
-  const event = useEvent();
-  const eventType = event.data;
+  const bookingData = useBookerStore((state) => state.bookingData);
+  const timeslot = useBookerStore((state) => state.selectedTimeslot);
+  const username = useBookerStore((state) => state.username);
+  const isInstantMeeting = useBookerStore((state) => state.isInstantMeeting);
+  const [expiryTime, setExpiryTime] = useState<Date | undefined>();
 
-  const reserveSlot = () => {
-    if (eventType?.id && timeslot && (duration || eventType?.length)) {
-      reserveSlotMutation.mutate({
-        slotUtcStartDate: dayjs(timeslot).utc().format(),
-        eventTypeId: eventType?.id,
-        slotUtcEndDate: dayjs(timeslot)
-          .utc()
-          .add(duration || eventType?.length, "minutes")
-          .format(),
-      });
-    }
-  };
+  const [responseVercelIdHeader] = useState<string | null>(null);
+  const { t } = useLocale();
 
-  useEffect(() => {
-    reserveSlot();
+  const isPaidEvent = useMemo(() => {
+    if (!eventType?.price) return false;
+    const paymentAppData = getPaymentAppData(eventType);
+    return eventType?.price > 0 && !Number.isNaN(paymentAppData.price) && paymentAppData.price > 0;
+  }, [eventType]);
 
-    const interval = setInterval(() => {
-      reserveSlot();
-    }, parseInt(MINUTES_TO_BOOK) * 60 * 1000 - 2000);
-
-    return () => {
-      if (eventType) {
-        removeSelectedSlot.mutate();
-      }
-      clearInterval(interval);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventType?.id, timeslot]);
-
-  const defaultValues = useMemo(() => {
-    if (Object.keys(formValues).length) return formValues;
-
-    if (!eventType?.bookingFields) {
-      return {};
-    }
-    const querySchema = getBookingResponsesPartialSchema({
-      eventType: {
-        bookingFields: eventType.bookingFields,
-      },
-      view: rescheduleUid ? "reschedule" : "booking",
-    });
-
-    const parsedQuery = querySchema.parse({
-      ...routerQuery,
-      // `guest` because we need to support legacy URL with `guest` query param support
-      // `guests` because the `name` of the corresponding bookingField is `guests`
-      guests: searchParams?.getAll("guests") || searchParams?.getAll("guest"),
-    });
-
-    const defaultUserValues = {
-      email: rescheduleUid
-        ? bookingData?.attendees[0].email
-        : parsedQuery["email"] || session.data?.user?.email || "",
-      name: rescheduleUid
-        ? bookingData?.attendees[0].name
-        : parsedQuery["name"] || session.data?.user?.name || "",
-    };
-
-    if (!isRescheduling) {
-      const defaults = {
-        responses: {} as Partial<z.infer<typeof bookingFormSchema>["responses"]>,
-      };
-
-      const responses = eventType.bookingFields.reduce((responses, field) => {
-        return {
-          ...responses,
-          [field.name]: parsedQuery[field.name] || undefined,
-        };
-      }, {});
-
-      defaults.responses = {
-        ...responses,
-        name: defaultUserValues.name,
-        email: defaultUserValues.email,
-      };
-
-      return defaults;
-    }
-
-    if ((!rescheduleUid && !bookingData) || !bookingData.attendees.length) {
-      return {};
-    }
-    const primaryAttendee = bookingData.attendees[0];
-    if (!primaryAttendee) {
-      return {};
-    }
-
-    const defaults = {
-      responses: {} as Partial<z.infer<typeof bookingFormSchema>["responses"]>,
-    };
-
-    const responses = eventType.bookingFields.reduce((responses, field) => {
-      return {
-        ...responses,
-        [field.name]: bookingData.responses[field.name],
-      };
-    }, {});
-    defaults.responses = {
-      ...responses,
-      name: defaultUserValues.name,
-      email: defaultUserValues.email,
-    };
-    return defaults;
-  }, [eventType?.bookingFields, formValues, isRescheduling, bookingData, rescheduleUid]);
-
-  const disableBookingTitle = !!event.data?.isDynamic;
-  const bookingFormSchema = z
-    .object({
-      responses: event?.data
-        ? getBookingResponsesSchema({
-            eventType: {
-              bookingFields: getBookingFieldsWithSystemFields({ ...event.data, disableBookingTitle }),
-            },
-            view: rescheduleUid ? "reschedule" : "booking",
-          })
-        : // Fallback until event is loaded.
-          z.object({}),
-    })
-    .passthrough();
-
-  type BookingFormValues = {
-    locationType?: EventLocationType["type"];
-    responses: z.infer<typeof bookingFormSchema>["responses"];
-    // Key is not really part of form values, but only used to have a key
-    // to set generic error messages on. Needed until RHF has implemented root error keys.
-    globalError: undefined;
-  };
-
-  const bookingForm = useForm<BookingFormValues>({
-    defaultValues,
-    resolver: zodResolver(bookingFormSchema), // Since this isn't set to strict we only validate the fields in the schema
-  });
-
-  const createBookingMutation = useMutation(createBooking, {
-    onSuccess: (responseData) => {
-      const { uid, paymentUid } = responseData;
-      const fullName = getFullName(bookingForm.getValues("responses.name"));
-      if (paymentUid) {
-        return router.push(
-          createPaymentLink({
-            paymentUid,
-            date: timeslot,
-            name: fullName,
-            email: bookingForm.getValues("responses.email"),
-            absolute: false,
-          })
-        );
-      }
-
-      if (!uid) {
-        console.error("No uid returned from createBookingMutation");
-        return;
-      }
-
-      const query = {
-        isSuccessBookingPage: true,
-        email: bookingForm.getValues("responses.email"),
-        eventTypeSlug: eventSlug,
-        seatReferenceUid: "seatReferenceUid" in responseData ? responseData.seatReferenceUid : null,
-        formerTime:
-          isRescheduling && bookingData?.startTime ? dayjs(bookingData.startTime).toString() : undefined,
-      };
-
-      return bookingSuccessRedirect({
-        successRedirectUrl: eventType?.successRedirectUrl || "",
-        query,
-        bookingUid: uid,
-      });
-    },
-    onError: () => {
-      errorRef && errorRef.current?.scrollIntoView({ behavior: "smooth" });
-    },
-  });
-
-  const createRecurringBookingMutation = useMutation(createRecurringBooking, {
-    onSuccess: async (responseData) => {
-      const { uid } = responseData[0] || {};
-
-      if (!uid) {
-        console.error("No uid returned from createRecurringBookingMutation");
-        return;
-      }
-
-      const query = {
-        isSuccessBookingPage: true,
-        allRemainingBookings: true,
-        email: bookingForm.getValues("responses.email"),
-        eventTypeSlug: eventSlug,
-        formerTime:
-          isRescheduling && bookingData?.startTime ? dayjs(bookingData.startTime).toString() : undefined,
-      };
-
-      return bookingSuccessRedirect({
-        successRedirectUrl: eventType?.successRedirectUrl || "",
-        query,
-        bookingUid: uid,
-      });
-    },
-  });
-
-  const [isEmailVerificationModalVisible, setEmailVerificationModalVisible] = useState(false);
-  const email = bookingForm.watch("responses.email");
-
-  const sendEmailVerificationByCodeMutation = trpc.viewer.auth.sendVerifyEmailCode.useMutation({
-    onSuccess() {
-      showToast(t("email_sent"), "success");
-    },
-    onError() {
-      showToast(t("email_not_sent"), "error");
-    },
-  });
-
-  const verifyEmail = () => {
-    bookingForm.clearErrors();
-
-    // It shouldn't be possible that this method is fired without having event data,
-    // but since in theory (looking at the types) it is possible, we still handle that case.
-    if (!event?.data) {
-      bookingForm.setError("globalError", { message: t("error_booking_event") });
-      return;
-    }
-
-    const name = bookingForm.getValues("responses.name");
-
-    sendEmailVerificationByCodeMutation.mutate({
-      email,
-      username: typeof name === "string" ? name : name.firstName,
-    });
-    setEmailVerificationModalVisible(true);
-  };
-
-  if (event.isError) return <Alert severity="warning" message={t("error_booking_event")} />;
-  if (event.isLoading || !event.data) return <FormSkeleton />;
+  if (eventQuery.isError) return <Alert severity="warning" message={t("error_booking_event")} />;
+  if (eventQuery.isPending || !eventQuery.data) return <FormSkeleton />;
   if (!timeslot)
     return (
       <EmptyScreen
@@ -318,64 +75,10 @@ export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
       />
     );
 
-  const bookEvent = (values: BookingFormValues) => {
-    // Clears form values stored in store, so old values won't stick around.
-    setFormValues({});
-    bookingForm.clearErrors();
-
-    // It shouldn't be possible that this method is fired without having event data,
-    // but since in theory (looking at the types) it is possible, we still handle that case.
-    if (!event?.data) {
-      bookingForm.setError("globalError", { message: t("error_booking_event") });
-      return;
-    }
-
-    // Ensures that duration is an allowed value, if not it defaults to the
-    // default event duration.
-    const validDuration =
-      duration &&
-      event.data.metadata?.multipleDuration &&
-      event.data.metadata?.multipleDuration.includes(duration)
-        ? duration
-        : event.data.length;
-
-    const bookingInput = {
-      values,
-      duration: validDuration,
-      event: event.data,
-      date: timeslot,
-      timeZone: timezone,
-      language: i18n.language,
-      rescheduleUid: rescheduleUid || undefined,
-      bookingUid: (bookingData && bookingData.uid) || seatedEventData?.bookingUid || undefined,
-      username: username || "",
-      metadata: Object.keys(routerQuery)
-        .filter((key) => key.startsWith("metadata"))
-        .reduce(
-          (metadata, key) => ({
-            ...metadata,
-            [key.substring("metadata[".length, key.length - 1)]: searchParams?.get(key),
-          }),
-          {}
-        ),
-    };
-
-    if (event.data?.recurringEvent?.freq && recurringEventCount) {
-      createRecurringBookingMutation.mutate(
-        mapRecurringBookingToMutationInput(bookingInput, recurringEventCount)
-      );
-    } else {
-      createBookingMutation.mutate(mapBookingToMutationInput(bookingInput));
-    }
-  };
-
   if (!eventType) {
     console.warn("No event type found for event", routerQuery);
     return <Alert severity="warning" message={t("error_booking_event")} />;
   }
-
-  const renderConfirmNotVerifyEmailButtonCond =
-    !eventType?.requiresBookerEmailVerification || (email && verifiedEmail && verifiedEmail === email);
 
   return (
     <div className="flex h-full flex-col">
@@ -389,61 +92,71 @@ export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
           setFormValues(values);
         }}
         form={bookingForm}
-        handleSubmit={renderConfirmNotVerifyEmailButtonCond ? bookEvent : verifyEmail}
+        handleSubmit={onSubmit}
         noValidate>
         <BookingFields
           isDynamicGroupBooking={!!(username && username.indexOf("+") > -1)}
           fields={eventType.bookingFields}
           locations={eventType.locations}
           rescheduleUid={rescheduleUid || undefined}
+          bookingData={bookingData}
         />
-        {(createBookingMutation.isError ||
-          createRecurringBookingMutation.isError ||
-          bookingForm.formState.errors["globalError"]) && (
+        {(errors.hasFormErrors || errors.hasDataErrors) && (
           <div data-testid="booking-fail">
             <Alert
               ref={errorRef}
               className="my-2"
               severity="info"
               title={rescheduleUid ? t("reschedule_fail") : t("booking_fail")}
-              message={getError(
-                bookingForm.formState.errors["globalError"],
-                createBookingMutation,
-                createRecurringBookingMutation,
-                t
-              )}
+              message={getError(errors.formErrors, errors.dataErrors, t, responseVercelIdHeader)}
             />
           </div>
         )}
+        <div className="text-subtle my-3 w-full text-xs opacity-80">
+          <Trans i18nKey="signing_up_terms">
+            By proceeding, you agree to our{" "}
+            <Link className="text-emphasis hover:underline" href={`${WEBSITE_URL}/terms`} target="_blank">
+              <a>Terms</a>
+            </Link>{" "}
+            and{" "}
+            <Link className="text-emphasis hover:underline" href={`${WEBSITE_URL}/privacy`} target="_blank">
+              <a>Privacy Policy</a>
+            </Link>
+            .
+          </Trans>
+        </div>
         <div className="modalsticky mt-auto flex justify-end space-x-2 rtl:space-x-reverse">
-          {!!onCancel && (
-            <Button color="minimal" type="button" onClick={onCancel} data-testid="back">
-              {t("back")}
+          {isInstantMeeting ? (
+            <Button type="submit" color="primary" loading={loadingStates.creatingInstantBooking}>
+              {isPaidEvent ? t("pay_and_book") : t("confirm")}
             </Button>
+          ) : (
+            <>
+              {!!onCancel && (
+                <Button color="minimal" type="button" onClick={onCancel} data-testid="back">
+                  {t("back")}
+                </Button>
+              )}
+              <Button
+                type="submit"
+                color="primary"
+                loading={loadingStates.creatingBooking || loadingStates.creatingRecurringBooking}
+                data-testid={
+                  rescheduleUid && bookingData ? "confirm-reschedule-button" : "confirm-book-button"
+                }>
+                {rescheduleUid && bookingData
+                  ? t("reschedule")
+                  : renderConfirmNotVerifyEmailButtonCond
+                  ? isPaidEvent
+                    ? t("pay_and_book")
+                    : t("confirm")
+                  : t("verify_email_email_button")}
+              </Button>
+            </>
           )}
-          <Button
-            type="submit"
-            color="primary"
-            loading={createBookingMutation.isLoading || createRecurringBookingMutation.isLoading}
-            data-testid={rescheduleUid ? "confirm-reschedule-button" : "confirm-book-button"}>
-            {rescheduleUid
-              ? t("reschedule")
-              : renderConfirmNotVerifyEmailButtonCond
-              ? t("confirm")
-              : t("verify_email_email_button")}
-          </Button>
         </div>
       </Form>
-      <VerifyCodeDialog
-        isOpenDialog={isEmailVerificationModalVisible}
-        setIsOpenDialog={setEmailVerificationModalVisible}
-        email={email}
-        onSuccess={() => {
-          setVerifiedEmail(email);
-          setEmailVerificationModalVisible(false);
-        }}
-        isUserSessionRequiredToVerify={false}
-      />
+      {children}
     </div>
   );
 };
@@ -454,18 +167,19 @@ const getError = (
   // Since they don't matter for this function, I'd rather disable them then giving you
   // the cognitive overload of thinking to update them here when anything changes.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  bookingMutation: UseMutationResult<any, any, any, any>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  recurringBookingMutation: UseMutationResult<any, any, any, any>,
-  t: TFunction
+  dataError: any,
+  t: TFunction,
+  responseVercelIdHeader: string | null
 ) => {
   if (globalError) return globalError.message;
 
-  const error = bookingMutation.error || recurringBookingMutation.error;
+  const error = dataError;
 
-  return error instanceof HttpError || error instanceof Error ? (
-    <>{t("can_you_try_again")}</>
+  return error.message ? (
+    <>
+      {responseVercelIdHeader ?? ""} {t(error.message)}
+    </>
   ) : (
-    "Unknown error"
+    <>{t("can_you_try_again")}</>
   );
 };

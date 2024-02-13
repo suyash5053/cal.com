@@ -1,10 +1,9 @@
 import type { Prisma } from "@prisma/client";
 import type { UnitTypeLongPlural } from "dayjs";
-import { pick } from "lodash";
+import type { TFunction } from "next-i18next";
 import z, { ZodNullable, ZodObject, ZodOptional } from "zod";
-
-/* eslint-disable no-underscore-dangle */
 import type {
+  AnyZodObject,
   objectInputType,
   objectOutputType,
   ZodNullableDef,
@@ -15,13 +14,12 @@ import type {
 
 import { appDataSchemas } from "@calcom/app-store/apps.schemas.generated";
 import dayjs from "@calcom/dayjs";
+import { isPasswordValid } from "@calcom/features/auth/lib/isPasswordValid";
 import type { FieldType as FormBuilderFieldType } from "@calcom/features/form-builder/schema";
 import { fieldsSchema as formBuilderFieldsSchema } from "@calcom/features/form-builder/schema";
 import { isSupportedTimeZone } from "@calcom/lib/date-fns";
 import { slugify } from "@calcom/lib/slugify";
 import { EventTypeCustomInputType } from "@calcom/prisma/enums";
-
-export const nonEmptyString = () => z.string().refine((value: string) => value.trim().length > 0);
 
 // Let's not import 118kb just to get an enum
 export enum Frequency {
@@ -114,17 +112,16 @@ export type BookingFieldType = FormBuilderFieldType;
 
 // Validation of user added bookingFields' responses happen using `getBookingResponsesSchema` which requires `eventType`.
 // So it is a dynamic validation and thus entire validation can't exist here
+// Note that this validation runs to validate prefill params as well, so it should consider that partial values can be there. e.g. `name` might be empty string
 export const bookingResponses = z
   .object({
     email: z.string(),
     //TODO: Why don't we move name out of bookingResponses and let it be handled like user fields?
     name: z.union([
-      nonEmptyString(),
+      z.string(),
       z.object({
-        firstName: nonEmptyString(),
-        lastName: nonEmptyString()
-          .refine((value: string) => value.trim().length > 0)
-          .optional(),
+        firstName: z.string(),
+        lastName: z.string().optional(),
       }),
     ]),
     guests: z.array(z.string()).optional(),
@@ -207,7 +204,13 @@ export const stringOrNumber = z.union([
   z.number().int(),
 ]);
 
-export const stringToDayjs = z.string().transform((val) => dayjs(val));
+export const stringToDayjs = (val: string) => {
+  const matches = val.match(/([+-]\d{2}:\d{2})$/);
+  const timezone = matches ? matches[1] : "+00:00";
+  return dayjs(val).utcOffset(timezone);
+};
+
+export const stringToDayjsZod = z.string().transform(stringToDayjs);
 
 export const bookingCreateBodySchema = z.object({
   end: z.string().optional(),
@@ -247,7 +250,14 @@ export const extendedBookingCreateBody = bookingCreateBodySchema.merge(
   z.object({
     noEmail: z.boolean().optional(),
     recurringCount: z.number().optional(),
-    allRecurringDates: z.string().array().optional(),
+    allRecurringDates: z
+      .array(
+        z.object({
+          start: z.string(),
+          end: z.string(),
+        })
+      )
+      .optional(),
     currentRecurringIndex: z.number().optional(),
     appsStatus: z
       .array(
@@ -261,6 +271,8 @@ export const extendedBookingCreateBody = bookingCreateBodySchema.merge(
         })
       )
       .optional(),
+    luckyUsers: z.array(z.number()).optional(),
+    customInputs: z.undefined().optional(),
   })
 );
 
@@ -298,6 +310,7 @@ export const vitalSettingsUpdateSchema = z.object({
 export const createdEventSchema = z
   .object({
     id: z.string(),
+    thirdPartyRecurringEventId: z.string(),
     password: z.union([z.string(), z.undefined()]),
     onlineMeetingUrl: z.string().nullable(),
     iCalUID: z.string().optional(),
@@ -318,18 +331,38 @@ export const userMetadata = z
       })
       .optional(),
     defaultBookerLayouts: bookerLayouts.optional(),
+    emailChangeWaitingForVerification: z.string().optional(),
+    migratedToOrgFrom: z
+      .object({
+        username: z.string().or(z.null()).optional(),
+        lastMigrationTime: z.string().optional(),
+        reverted: z.boolean().optional(),
+        revertTime: z.string().optional(),
+      })
+      .optional(),
   })
   .nullable();
 
+export type userMetadataType = z.infer<typeof userMetadata>;
+
 export const teamMetadataSchema = z
   .object({
-    requestedSlug: z.string(),
+    requestedSlug: z.string().or(z.null()),
     paymentId: z.string(),
     subscriptionId: z.string().nullable(),
     subscriptionItemId: z.string().nullable(),
     isOrganization: z.boolean().nullable(),
     isOrganizationVerified: z.boolean().nullable(),
+    isOrganizationConfigured: z.boolean().nullable(),
     orgAutoAcceptEmail: z.string().nullable(),
+    migratedToOrgFrom: z
+      .object({
+        teamSlug: z.string().or(z.null()).optional(),
+        lastMigrationTime: z.string().optional(),
+        reverted: z.boolean().optional(),
+        lastRevertTime: z.string().optional(),
+      })
+      .optional(),
   })
   .partial()
   .nullable();
@@ -527,11 +560,13 @@ export const optionToValueSchema = <T extends z.ZodTypeAny>(valueSchema: T) =>
  * @url https://github.com/colinhacks/zod/discussions/1655#discussioncomment-4367368
  */
 export const getParserWithGeneric =
-  <T extends z.ZodTypeAny>(valueSchema: T) =>
+  <T extends AnyZodObject>(valueSchema: T) =>
   <Data>(data: Data) => {
-    type Output = z.infer<typeof valueSchema>;
+    type Output = z.infer<T>;
+    type SimpleFormValues = string | number | null | undefined;
     return valueSchema.parse(data) as {
-      [key in keyof Data]: key extends keyof Output ? Output[key] : Data[key];
+      // TODO: Invesitage why this broke on zod 3.22.2 upgrade
+      [key in keyof Data]: Data[key] extends SimpleFormValues ? Data[key] : Output[key];
     };
   };
 export const sendDailyVideoRecordingEmailsSchema = z.object({
@@ -547,6 +582,7 @@ export const downloadLinkSchema = z.object({
 export const allManagedEventTypeProps: { [k in keyof Omit<Prisma.EventTypeSelect, "id">]: true } = {
   title: true,
   description: true,
+  isInstantEvent: true,
   currency: true,
   periodDays: true,
   position: true,
@@ -571,6 +607,7 @@ export const allManagedEventTypeProps: { [k in keyof Omit<Prisma.EventTypeSelect
   successRedirectUrl: true,
   seatsPerTimeSlot: true,
   seatsShowAttendees: true,
+  seatsShowAvailabilityCount: true,
   periodType: true,
   hashedLink: true,
   webhooks: true,
@@ -579,17 +616,21 @@ export const allManagedEventTypeProps: { [k in keyof Omit<Prisma.EventTypeSelect
   destinationCalendar: true,
   periodCountCalendarDays: true,
   bookingLimits: true,
+  onlyShowFirstAvailableSlot: true,
   slotInterval: true,
   scheduleId: true,
   workflows: true,
   bookingFields: true,
   durationLimits: true,
+  assignAllTeamMembers: true,
 };
 
 // All properties that are defined as unlocked based on all managed props
 // Eventually this is going to be just a default and the user can change the config through the UI
 export const unlockedManagedEventTypeProps = {
-  ...pick(allManagedEventTypeProps, ["locations", "scheduleId", "destinationCalendar"]),
+  locations: allManagedEventTypeProps.locations,
+  scheduleId: allManagedEventTypeProps.scheduleId,
+  destinationCalendar: allManagedEventTypeProps.destinationCalendar,
 };
 
 // The PR at https://github.com/colinhacks/zod/pull/2157 addresses this issue and improves email validation
@@ -600,9 +641,40 @@ export const emailSchemaRefinement = (value: string) => {
   return emailRegex.test(value);
 };
 
+export const signupSchema = z.object({
+  // Username is marked optional here because it's requirement depends on if it's the Organization invite or a team invite which isn't easily done in zod
+  // It's better handled beyond zod in `validateAndGetCorrectedUsernameAndEmail`
+  username: z.string().optional(),
+  email: z.string().email(),
+  password: z.string().superRefine((data, ctx) => {
+    const isStrict = false;
+    const result = isPasswordValid(data, true, isStrict);
+    Object.keys(result).map((key: string) => {
+      if (!result[key as keyof typeof result]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: key,
+        });
+      }
+    });
+  }),
+  language: z.string().optional(),
+  token: z.string().optional(),
+});
+
 export const ZVerifyCodeInputSchema = z.object({
   email: z.string().email(),
   code: z.string(),
 });
 
 export type ZVerifyCodeInputSchema = z.infer<typeof ZVerifyCodeInputSchema>;
+
+export const coerceToDate = z.coerce.date();
+export const getStringAsNumberRequiredSchema = (t: TFunction) =>
+  z.string().min(1, t("error_required_field")).pipe(z.coerce.number());
+
+export const bookingSeatDataSchema = z.object({
+  description: z.string().optional(),
+  responses: bookingResponses,
+});

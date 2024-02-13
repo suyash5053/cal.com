@@ -1,6 +1,7 @@
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 
 import { APP_NAME } from "@calcom/lib/constants";
+import { useCompatSearchParams } from "@calcom/lib/hooks/useCompatSearchParams";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { trpc } from "@calcom/trpc/react";
 import { Meta, showToast, SkeletonContainer } from "@calcom/ui";
@@ -11,8 +12,8 @@ import WebhookForm from "../components/WebhookForm";
 import { subscriberUrlReserved } from "../lib/subscriberUrlReserved";
 
 const EditWebhook = () => {
-  const searchParams = useSearchParams();
-  const id = searchParams.get("id");
+  const searchParams = useCompatSearchParams();
+  const id = searchParams?.get("id");
 
   if (!id) return <SkeletonContainer />;
 
@@ -24,7 +25,7 @@ function Component({ webhookId }: { webhookId: string }) {
   const { t } = useLocale();
   const utils = trpc.useContext();
   const router = useRouter();
-  const { data: installedApps, isLoading } = trpc.viewer.integrations.useQuery(
+  const { data: installedApps, isPending } = trpc.viewer.integrations.useQuery(
     { variant: "other", onlyInstalled: true },
     {
       suspense: true,
@@ -53,18 +54,19 @@ function Component({ webhookId }: { webhookId: string }) {
     },
   });
 
-  if (isLoading || !webhook) return <SkeletonContainer />;
+  if (isPending || !webhook) return <SkeletonContainer />;
 
   return (
     <>
       <Meta
         title={t("edit_webhook")}
         description={t("add_webhook_description", { appName: APP_NAME })}
+        borderInShellHeader={true}
         backButton
       />
       <WebhookForm
+        noRoutingFormTriggers={false}
         webhook={webhook}
-        noRoutingFormTriggers={!!webhook.teamId}
         onSubmit={(values: WebhookFormSubmitData) => {
           if (
             subscriberUrlReserved({
@@ -80,7 +82,7 @@ function Component({ webhookId }: { webhookId: string }) {
           }
 
           if (values.changeSecret) {
-            values.secret = values.newSecret.length ? values.newSecret : null;
+            values.secret = values.newSecret.trim().length ? values.newSecret : null;
           }
 
           if (!values.payloadTemplate) {

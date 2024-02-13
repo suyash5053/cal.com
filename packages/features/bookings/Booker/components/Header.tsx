@@ -3,9 +3,11 @@ import { useCallback, useMemo } from "react";
 import { shallow } from "zustand/shallow";
 
 import dayjs from "@calcom/dayjs";
+import { useIsEmbed } from "@calcom/embed-core/embed-iframe";
+import { WEBAPP_URL } from "@calcom/lib/constants";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { BookerLayouts } from "@calcom/prisma/zod-utils";
-import { Button, ButtonGroup, ToggleGroup } from "@calcom/ui";
+import { Button, ButtonGroup, ToggleGroup, Tooltip } from "@calcom/ui";
 import { Calendar, Columns, Grid } from "@calcom/ui/components/icon";
 
 import { TimeFormatToggle } from "../../components/TimeFormatToggle";
@@ -16,12 +18,21 @@ export function Header({
   extraDays,
   isMobile,
   enabledLayouts,
+  nextSlots,
+  eventSlug,
+  isMyLink,
+  renderOverlay,
 }: {
   extraDays: number;
   isMobile: boolean;
   enabledLayouts: BookerLayouts[];
+  nextSlots: number;
+  eventSlug: string;
+  isMyLink: boolean;
+  renderOverlay?: () => JSX.Element | null;
 }) {
   const { t, i18n } = useLocale();
+  const isEmbed = useIsEmbed();
   const [layout, setLayout] = useBookerStore((state) => [state.layout, state.setLayout], shallow);
   const selectedDateString = useBookerStore((state) => state.selectedDate);
   const setSelectedDate = useBookerStore((state) => state.setSelectedDate);
@@ -51,13 +62,27 @@ export function Header({
       <LayoutToggle onLayoutToggle={onLayoutToggle} layout={layout} enabledLayouts={enabledLayouts} />
     );
   };
-
   // In month view we only show the layout toggle.
   if (isMonthView) {
-    return <LayoutToggleWithData />;
+    return (
+      <div className="flex gap-2">
+        {isMyLink && !isEmbed ? (
+          <Tooltip content={t("troubleshooter_tooltip")} side="bottom">
+            <Button
+              color="primary"
+              target="_blank"
+              href={`${WEBAPP_URL}/availability/troubleshoot?eventType=${eventSlug}`}>
+              {t("need_help")}
+            </Button>
+          </Tooltip>
+        ) : (
+          renderOverlay?.()
+        )}
+        <LayoutToggleWithData />
+      </div>
+    );
   }
-
-  const endDate = selectedDate.add(extraDays - 1, "days");
+  const endDate = selectedDate.add(layout === BookerLayouts.COLUMN_VIEW ? extraDays : extraDays - 1, "days");
 
   const isSameMonth = () => {
     return selectedDate.format("MMM") === endDate.format("MMM");
@@ -91,7 +116,7 @@ export function Header({
             color="minimal"
             StartIcon={ChevronLeft}
             aria-label="Previous Day"
-            onClick={() => addToSelectedDate(-extraDays - 1)}
+            onClick={() => addToSelectedDate(layout === BookerLayouts.COLUMN_VIEW ? -nextSlots : -extraDays)}
           />
           <Button
             className="group rtl:mr-1 rtl:rotate-180"
@@ -99,7 +124,7 @@ export function Header({
             color="minimal"
             StartIcon={ChevronRight}
             aria-label="Next Day"
-            onClick={() => addToSelectedDate(extraDays + 1)}
+            onClick={() => addToSelectedDate(layout === BookerLayouts.COLUMN_VIEW ? nextSlots : extraDays)}
           />
           {selectedDateMin3DaysDifference && (
             <Button
@@ -112,6 +137,7 @@ export function Header({
         </ButtonGroup>
       </div>
       <div className="ml-auto flex gap-2">
+        {renderOverlay?.()}
         <TimeFormatToggle />
         <div className="fixed top-4 ltr:right-4 rtl:left-4">
           <LayoutToggleWithData />
@@ -140,7 +166,7 @@ const LayoutToggle = ({
   layout: string;
   enabledLayouts?: BookerLayouts[];
 }) => {
-  const isEmbed = typeof window !== "undefined" && window?.isEmbed?.();
+  const isEmbed = useIsEmbed();
 
   const { t } = useLocale();
 

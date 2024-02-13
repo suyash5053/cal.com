@@ -4,6 +4,7 @@ import { getStripeCustomerIdFromUserId } from "@calcom/app-store/stripepayment/l
 import stripe from "@calcom/app-store/stripepayment/lib/server";
 import { WEBAPP_URL } from "@calcom/lib/constants";
 import { ORGANIZATION_MIN_SEATS } from "@calcom/lib/constants";
+import { isOrganization } from "@calcom/lib/entityPermissionUtils";
 import prisma from "@calcom/prisma";
 import { teamMetadataSchema } from "@calcom/prisma/zod-utils";
 
@@ -29,6 +30,51 @@ export const checkIfTeamPaymentRequired = async ({ teamId = -1 }) => {
   return { url: `${WEBAPP_URL}/api/teams/${teamId}/upgrade?session_id=${metadata.paymentId}` };
 };
 
+/**
+ * Used to generate a checkout session when trying to create a team
+ */
+export const generateTeamCheckoutSession = async ({
+  teamName,
+  teamSlug,
+  userId,
+}: {
+  teamName: string;
+  teamSlug: string;
+  userId: number;
+}) => {
+  const customer = await getStripeCustomerIdFromUserId(userId);
+  const session = await stripe.checkout.sessions.create({
+    customer,
+    mode: "subscription",
+    allow_promotion_codes: true,
+    success_url: `${WEBAPP_URL}/api/teams/create?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${WEBAPP_URL}/settings/my-account/profile`,
+    line_items: [
+      {
+        /** We only need to set the base price and we can upsell it directly on Stripe's checkout  */
+        price: process.env.STRIPE_TEAM_MONTHLY_PRICE_ID,
+        /**Initially it will be just the team owner */
+        quantity: 1,
+      },
+    ],
+    customer_update: {
+      address: "auto",
+    },
+    automatic_tax: {
+      enabled: true,
+    },
+    metadata: {
+      teamName,
+      teamSlug,
+      userId,
+    },
+  });
+  return session;
+};
+
+/**
+ * Used to generate a checkout session when creating a new org (parent team) or backwards compatibility for old teams
+ */
 export const purchaseTeamSubscription = async (input: {
   teamId: number;
   seats: number;
@@ -75,8 +121,9 @@ export const purchaseTeamSubscription = async (input: {
 const getTeamWithPaymentMetadata = async (teamId: number) => {
   const team = await prisma.team.findUniqueOrThrow({
     where: { id: teamId },
-    select: { metadata: true, members: true, _count: { select: { orgUsers: true } } },
+    select: { metadata: true, members: true },
   });
+
   const metadata = teamPaymentMetadataSchema.parse(team.metadata);
   return { ...team, metadata };
 };
@@ -110,17 +157,15 @@ export const updateQuantitySubscriptionFromStripe = async (teamId: number) => {
     )?.quantity;
     if (!subscriptionQuantity) throw new Error("Subscription not found");
 
-    if (!!team._count.orgUsers && membershipCount < ORGANIZATION_MIN_SEATS) {
+    if (!!isOrganization({ team }) && membershipCount < ORGANIZATION_MIN_SEATS) {
       console.info(
         `Org ${teamId} has less members than the min ${ORGANIZATION_MIN_SEATS}, skipping updating subscription.`
       );
       return;
     }
 
-    const newQuantity = membershipCount - subscriptionQuantity;
-
     await stripe.subscriptions.update(subscriptionId, {
-      items: [{ quantity: membershipCount + newQuantity, id: subscriptionItemId }],
+      items: [{ quantity: membershipCount, id: subscriptionItemId }],
     });
     console.info(
       `Updated subscription ${subscriptionId} for team ${teamId} to ${team.members.length} seats.`

@@ -1,22 +1,17 @@
-import type { PrismaClient, Prisma } from "@prisma/client";
-import short from "short-uuid";
-import { v5 as uuidv5 } from "uuid";
+import type { Prisma } from "@prisma/client";
+import type { DeepMockProxy } from "vitest-mock-extended";
 
 import { sendSlugReplacementEmail } from "@calcom/emails/email-manager";
+import { generateHashedLink } from "@calcom/lib/generateHashedLink";
 import { getTranslation } from "@calcom/lib/server/i18n";
+import type { PrismaClient } from "@calcom/prisma";
 import { SchedulingType } from "@calcom/prisma/enums";
 import { _EventTypeModel } from "@calcom/prisma/zod";
 import { allManagedEventTypeProps, unlockedManagedEventTypeProps } from "@calcom/prisma/zod-utils";
 
-const generateHashedLink = (id: number) => {
-  const translator = short();
-  const seed = `${id}:${new Date().getTime()}`;
-  const uid = translator.fromUUID(uuidv5(seed, uuidv5.URL));
-  return uid;
-};
-
 interface handleChildrenEventTypesProps {
   eventTypeId: number;
+  profileId: number | null;
   updatedEventType: {
     schedulingType: SchedulingType | null;
     slug: string;
@@ -40,7 +35,7 @@ interface handleChildrenEventTypesProps {
         };
       }[]
     | undefined;
-  prisma: PrismaClient;
+  prisma: PrismaClient | DeepMockProxy<PrismaClient>;
 }
 
 const sendAllSlugReplacementEmails = async (
@@ -99,6 +94,7 @@ export default async function handleChildrenEventTypes({
   connectedLink,
   children,
   prisma,
+  profileId,
 }: handleChildrenEventTypesProps) {
   // Check we are dealing with a managed event type
   if (updatedEventType?.schedulingType !== SchedulingType.MANAGED)
@@ -175,6 +171,7 @@ export default async function handleChildrenEventTypes({
       newUserIds.map((userId) => {
         return prisma.eventType.create({
           data: {
+            profileId: profileId ?? null,
             ...managedEventTypeValues,
             ...unlockedEventTypeValues,
             bookingLimits:
@@ -184,6 +181,7 @@ export default async function handleChildrenEventTypes({
             metadata: (managedEventTypeValues.metadata as Prisma.InputJsonValue) ?? undefined,
             bookingFields: (managedEventTypeValues.bookingFields as Prisma.InputJsonValue) ?? undefined,
             durationLimits: (managedEventTypeValues.durationLimits as Prisma.InputJsonValue) ?? undefined,
+            onlyShowFirstAvailableSlot: managedEventTypeValues.onlyShowFirstAvailableSlot ?? false,
             userId,
             users: {
               connect: [{ id: userId }],
@@ -230,9 +228,11 @@ export default async function handleChildrenEventTypes({
           },
           data: {
             ...managedEventTypeValues,
+            profileId: profileId ?? null,
             hidden: children?.find((ch) => ch.owner.id === userId)?.hidden ?? false,
             bookingLimits:
               (managedEventTypeValues.bookingLimits as unknown as Prisma.InputJsonObject) ?? undefined,
+            onlyShowFirstAvailableSlot: managedEventTypeValues.onlyShowFirstAvailableSlot ?? false,
             recurringEvent:
               (managedEventTypeValues.recurringEvent as unknown as Prisma.InputJsonValue) ?? undefined,
             metadata: (managedEventTypeValues.metadata as Prisma.InputJsonValue) ?? undefined,

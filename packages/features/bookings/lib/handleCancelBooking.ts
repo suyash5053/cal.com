@@ -5,17 +5,16 @@ import appStore from "@calcom/app-store";
 import { getCalendar } from "@calcom/app-store/_utils/getCalendar";
 import { FAKE_DAILY_CREDENTIAL } from "@calcom/app-store/dailyvideo/lib/VideoApiAdapter";
 import { DailyLocationType } from "@calcom/app-store/locations";
-import { cancelScheduledJobs } from "@calcom/app-store/zapier/lib/nodeScheduler";
-import { deleteMeeting, updateMeeting } from "@calcom/core/videoClient";
+import { deleteMeeting } from "@calcom/core/videoClient";
 import dayjs from "@calcom/dayjs";
-import { sendCancelledEmails, sendCancelledSeatEmails } from "@calcom/emails";
+import { sendCancelledEmails } from "@calcom/emails";
 import { getCalEventResponses } from "@calcom/features/bookings/lib/getCalEventResponses";
-import { isEventTypeOwnerKYCVerified } from "@calcom/features/ee/workflows/lib/isEventTypeOwnerKYCVerified";
 import { deleteScheduledEmailReminder } from "@calcom/features/ee/workflows/lib/reminders/emailReminderManager";
 import { sendCancelledReminders } from "@calcom/features/ee/workflows/lib/reminders/reminderScheduler";
 import { deleteScheduledSMSReminder } from "@calcom/features/ee/workflows/lib/reminders/smsReminderManager";
 import { deleteScheduledWhatsappReminder } from "@calcom/features/ee/workflows/lib/reminders/whatsappReminderManager";
 import getWebhooks from "@calcom/features/webhooks/lib/getWebhooks";
+import { cancelScheduledJobs } from "@calcom/features/webhooks/lib/scheduleTrigger";
 import type { EventTypeInfo } from "@calcom/features/webhooks/lib/sendPayload";
 import sendPayload from "@calcom/features/webhooks/lib/sendPayload";
 import { isPrismaObjOrUndefined, parseRecurringEvent } from "@calcom/lib";
@@ -26,10 +25,14 @@ import { handleRefundError } from "@calcom/lib/payment/handleRefundError";
 import { getTranslation } from "@calcom/lib/server/i18n";
 import { getTimeFormatStringFromUserTimeFormat } from "@calcom/lib/timeFormat";
 import prisma, { bookingMinimalSelect } from "@calcom/prisma";
-import { BookingStatus, MembershipRole, WorkflowMethods, WebhookTriggerEvents } from "@calcom/prisma/enums";
+import type { WebhookTriggerEvents } from "@calcom/prisma/enums";
+import { BookingStatus, MembershipRole, WorkflowMethods } from "@calcom/prisma/enums";
+import { credentialForCalendarServiceSelect } from "@calcom/prisma/selects/credential";
 import { schemaBookingCancelParams } from "@calcom/prisma/zod-utils";
 import type { CalendarEvent } from "@calcom/types/Calendar";
 import type { IAbstractPaymentService, PaymentApp } from "@calcom/types/PaymentService";
+
+import cancelAttendeeSeat from "./handleSeats/cancel/cancelAttendeeSeat";
 
 async function getBookingToDelete(id: number | undefined, uid: string | undefined) {
   return await prisma.booking.findUnique({
@@ -44,7 +47,7 @@ async function getBookingToDelete(id: number | undefined, uid: string | undefine
       user: {
         select: {
           id: true,
-          credentials: true, // Not leaking at the moment, be careful with
+          credentials: { select: credentialForCalendarServiceSelect }, // Not leaking at the moment, be careful with
           email: true,
           timeZone: true,
           timeFormat: true,
@@ -59,6 +62,7 @@ async function getBookingToDelete(id: number | undefined, uid: string | undefine
           type: true,
           externalCalendarId: true,
           credentialId: true,
+          thirdPartyRecurringEventId: true,
         },
       },
       payment: true,
@@ -70,20 +74,14 @@ async function getBookingToDelete(id: number | undefined, uid: string | undefine
             select: {
               id: true,
               hideBranding: true,
-              metadata: true,
-              teams: {
-                select: {
-                  accepted: true,
-                  team: {
-                    select: {
-                      metadata: true,
-                    },
-                  },
-                },
-              },
             },
           },
-          teamId: true,
+          team: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
           recurringEvent: true,
           title: true,
           eventName: true,
@@ -113,6 +111,7 @@ async function getBookingToDelete(id: number | undefined, uid: string | undefine
         },
       },
       uid: true,
+      id: true,
       eventTypeId: true,
       destinationCalendar: true,
       smsReminderNumber: true,
@@ -120,11 +119,13 @@ async function getBookingToDelete(id: number | undefined, uid: string | undefine
       scheduledJobs: true,
       seatsReferences: true,
       responses: true,
+      iCalUID: true,
+      iCalSequence: true,
     },
   });
 }
 
-type CustomRequest = NextApiRequest & {
+export type CustomRequest = NextApiRequest & {
   userId?: number;
   bookingToDelete?: Awaited<ReturnType<typeof getBookingToDelete>>;
 };
@@ -139,12 +140,21 @@ async function handler(req: CustomRequest) {
     throw new HttpError({ statusCode: 400, message: "Booking not found" });
   }
 
-  if (userId !== bookingToDelete.user?.id && bookingToDelete.startTime < new Date()) {
-    throw new HttpError({ statusCode: 400, message: "Cannot cancel past events" });
-  }
-
   if (!bookingToDelete.userId) {
     throw new HttpError({ statusCode: 400, message: "User not found" });
+  }
+
+  // If the booking is a seated event and there is no seatReferenceUid we should validate that logged in user is host
+  if (bookingToDelete.eventType?.seatsPerTimeSlot && !seatReferenceUid) {
+    const userIsHost = bookingToDelete.eventType.hosts.find((host) => {
+      if (host.user.id === userId) return true;
+    });
+
+    const userIsOwnerOfEventType = bookingToDelete.eventType.owner?.id === userId;
+
+    if (!userIsHost && !userIsOwnerOfEventType) {
+      throw new HttpError({ statusCode: 401, message: "User not a host of this event" });
+    }
   }
 
   // get webhooks
@@ -152,13 +162,14 @@ async function handler(req: CustomRequest) {
 
   const teamId = await getTeamIdFromEventType({
     eventType: {
-      team: { id: bookingToDelete.eventType?.teamId ?? null },
+      team: { id: bookingToDelete.eventType?.team?.id ?? null },
       parentId: bookingToDelete?.eventType?.parentId ?? null,
     },
   });
+  const triggerForUser = !teamId || (teamId && bookingToDelete.eventType?.parentId);
 
   const subscriberOptions = {
-    userId: bookingToDelete.userId,
+    userId: triggerForUser ? bookingToDelete.userId : null,
     eventTypeId: bookingToDelete.eventTypeId as number,
     triggerEvent: eventTrigger,
     teamId,
@@ -223,9 +234,10 @@ async function handler(req: CustomRequest) {
 
   const evt: CalendarEvent = {
     title: bookingToDelete?.title,
-    type: (bookingToDelete?.eventType?.title as string) || bookingToDelete?.title,
+    type: bookingToDelete?.eventType?.slug as string,
     description: bookingToDelete?.description || "",
     customInputs: isPrismaObjOrUndefined(bookingToDelete.customInputs),
+    eventTypeId: bookingToDelete.eventTypeId as number,
     ...getCalEventResponses({
       bookingFields: bookingToDelete.eventType?.bookingFields ?? null,
       booking: bookingToDelete,
@@ -241,44 +253,32 @@ async function handler(req: CustomRequest) {
     },
     attendees: attendeesList,
     uid: bookingToDelete?.uid,
+    bookingId: bookingToDelete?.id,
     /* Include recurringEvent information only when cancelling all bookings */
     recurringEvent: allRemainingBookings
       ? parseRecurringEvent(bookingToDelete.eventType?.recurringEvent)
       : undefined,
     location: bookingToDelete?.location,
-    destinationCalendar: bookingToDelete?.destinationCalendar || bookingToDelete?.user.destinationCalendar,
+    destinationCalendar: bookingToDelete?.destinationCalendar
+      ? [bookingToDelete?.destinationCalendar]
+      : bookingToDelete?.user.destinationCalendar
+      ? [bookingToDelete?.user.destinationCalendar]
+      : [],
     cancellationReason: cancellationReason,
-    ...(teamMembers && { team: { name: "", members: teamMembers } }),
+    ...(teamMembers && {
+      team: { name: bookingToDelete?.eventType?.team?.name || "Nameless", members: teamMembers, id: teamId! },
+    }),
     seatsPerTimeSlot: bookingToDelete.eventType?.seatsPerTimeSlot,
     seatsShowAttendees: bookingToDelete.eventType?.seatsShowAttendees,
+    iCalUID: bookingToDelete.iCalUID,
+    iCalSequence: bookingToDelete.iCalSequence + 1,
   };
 
   const dataForWebhooks = { evt, webhooks, eventTypeInfo };
 
   // If it's just an attendee of a booking then just remove them from that booking
-  const result = await handleSeatedEventCancellation(req, dataForWebhooks);
+  const result = await cancelAttendeeSeat(req, dataForWebhooks);
   if (result) return { success: true };
-
-  // If it's just an attendee of a booking then just remove them from that booking
-  if (seatReferenceUid && bookingToDelete.attendees.length > 1) {
-    const seatReference = bookingToDelete.seatsReferences.find(
-      (reference) => reference.referenceUid === seatReferenceUid
-    );
-
-    const attendee = bookingToDelete.attendees.find((attendee) => attendee.id === seatReference?.attendeeId);
-
-    if (!seatReference || !attendee)
-      throw new HttpError({ statusCode: 400, message: "User not a part of this booking" });
-
-    await prisma.attendee.delete({
-      where: {
-        id: seatReference.attendeeId,
-      },
-    });
-
-    req.statusCode = 200;
-    return { message: "No longer attending event" };
-  }
 
   const promises = webhooks.map((webhook) =>
     sendPayload(webhook.secret, eventTrigger, new Date().toISOString(), webhook, {
@@ -292,8 +292,6 @@ async function handler(req: CustomRequest) {
   );
   await Promise.all(promises);
 
-  const isKYCVerified = isEventTypeOwnerKYCVerified(bookingToDelete.eventType);
-
   //Workflows - schedule reminders
   if (bookingToDelete.eventType?.workflows) {
     await sendCancelledReminders({
@@ -304,7 +302,7 @@ async function handler(req: CustomRequest) {
         ...{ eventType: { slug: bookingToDelete.eventType.slug } },
       },
       hideBranding: !!bookingToDelete.eventType.owner?.hideBranding,
-      isKYCVerified,
+      eventTypeRequiresConfirmation: bookingToDelete.eventType.requiresConfirmation,
     });
   }
 
@@ -379,6 +377,8 @@ async function handler(req: CustomRequest) {
       data: {
         status: BookingStatus.CANCELLED,
         cancellationReason: cancellationReason,
+        // Assume that canceling the booking is the last action
+        iCalSequence: evt.iCalSequence || 100,
       },
       select: {
         startTime: true,
@@ -403,56 +403,90 @@ async function handler(req: CustomRequest) {
   if (bookingToDelete.location === DailyLocationType) {
     bookingToDelete.user.credentials.push({
       ...FAKE_DAILY_CREDENTIAL,
-      teamId: bookingToDelete.eventType?.teamId || null,
+      teamId: bookingToDelete.eventType?.team?.id || null,
     });
   }
 
   const apiDeletes = [];
 
-  const bookingCalendarReference = bookingToDelete.references.find((reference) =>
+  const bookingCalendarReference = bookingToDelete.references.filter((reference) =>
     reference.type.includes("_calendar")
   );
 
-  if (bookingCalendarReference) {
-    const { credentialId, uid, externalCalendarId } = bookingCalendarReference;
-    // If the booking calendar reference contains a credentialId
-    if (credentialId) {
-      // Find the correct calendar credential under user credentials
-      const calendarCredential = bookingToDelete.user.credentials.find(
-        (credential) => credential.id === credentialId
-      );
-      if (calendarCredential) {
-        const calendar = await getCalendar(calendarCredential);
-        if (
-          bookingToDelete.eventType?.recurringEvent &&
-          bookingToDelete.recurringEventId &&
-          allRemainingBookings
-        ) {
-          bookingToDelete.user.credentials
-            .filter((credential) => credential.type.endsWith("_calendar"))
-            .forEach(async (credential) => {
-              const calendar = await getCalendar(credential);
-              for (const updBooking of updatedBookings) {
-                const bookingRef = updBooking.references.find((ref) => ref.type.includes("_calendar"));
-                if (bookingRef) {
-                  const { uid, externalCalendarId } = bookingRef;
-                  const deletedEvent = await calendar?.deleteEvent(uid, evt, externalCalendarId);
-                  apiDeletes.push(deletedEvent);
+  if (bookingCalendarReference.length > 0) {
+    for (const reference of bookingCalendarReference) {
+      const { credentialId, uid, externalCalendarId } = reference;
+      // If the booking calendar reference contains a credentialId
+      if (credentialId) {
+        // Find the correct calendar credential under user credentials
+        let calendarCredential = bookingToDelete.user.credentials.find(
+          (credential) => credential.id === credentialId
+        );
+        if (!calendarCredential) {
+          // get credential from DB
+          const foundCalendarCredential = await prisma.credential.findUnique({
+            where: {
+              id: credentialId,
+            },
+            select: credentialForCalendarServiceSelect,
+          });
+          if (foundCalendarCredential) {
+            calendarCredential = foundCalendarCredential;
+          }
+        }
+        if (calendarCredential) {
+          const calendar = await getCalendar(calendarCredential);
+          if (
+            bookingToDelete.eventType?.recurringEvent &&
+            bookingToDelete.recurringEventId &&
+            allRemainingBookings
+          ) {
+            let thirdPartyRecurringEventId;
+            for (const reference of bookingToDelete.references) {
+              if (reference.thirdPartyRecurringEventId) {
+                thirdPartyRecurringEventId = reference.thirdPartyRecurringEventId;
+                break;
+              }
+            }
+            if (thirdPartyRecurringEventId) {
+              apiDeletes.push(
+                calendar?.deleteEvent(thirdPartyRecurringEventId, evt, externalCalendarId) as Promise<unknown>
+              );
+            } else {
+              const promises = bookingToDelete.user.credentials
+                .filter((credential) => credential.type.endsWith("_calendar"))
+                .map(async (credential) => {
+                  const calendar = await getCalendar(credential);
+                  for (const updBooking of updatedBookings) {
+                    const bookingRef = updBooking.references.find((ref) => ref.type.includes("_calendar"));
+                    if (bookingRef) {
+                      const { uid, externalCalendarId } = bookingRef;
+                      const deletedEvent = await calendar?.deleteEvent(uid, evt, externalCalendarId);
+                      apiDeletes.push(deletedEvent);
+                    }
+                  }
+                });
+              try {
+                await Promise.all(promises);
+              } catch (error) {
+                if (error instanceof Error) {
+                  logger.error(error.message);
                 }
               }
-            });
-        } else {
+            }
+          } else {
+            apiDeletes.push(calendar?.deleteEvent(uid, evt, externalCalendarId) as Promise<unknown>);
+          }
+        }
+      } else {
+        // For bookings made before the refactor we go through the old behavior of running through each calendar credential
+        const calendarCredentials = bookingToDelete.user.credentials.filter((credential) =>
+          credential.type.endsWith("_calendar")
+        );
+        for (const credential of calendarCredentials) {
+          const calendar = await getCalendar(credential);
           apiDeletes.push(calendar?.deleteEvent(uid, evt, externalCalendarId) as Promise<unknown>);
         }
-      }
-    } else {
-      // For bookings made before the refactor we go through the old behaviour of running through each calendar credential
-      const calendarCredentials = bookingToDelete.user.credentials.filter((credential) =>
-        credential.type.endsWith("_calendar")
-      );
-      for (const credential of calendarCredentials) {
-        const calendar = await getCalendar(credential);
-        apiDeletes.push(calendar?.deleteEvent(uid, evt, externalCalendarId) as Promise<unknown>);
       }
     }
   }
@@ -479,7 +513,7 @@ async function handler(req: CustomRequest) {
   // Avoiding taking care of recurrence for now as Payments are not supported with Recurring Events at the moment
   if (bookingToDelete && bookingToDelete.paid) {
     const evt: CalendarEvent = {
-      type: bookingToDelete?.eventType?.title as string,
+      type: bookingToDelete?.eventType?.slug as string,
       title: bookingToDelete.title,
       description: bookingToDelete.description ?? "",
       customInputs: isPrismaObjOrUndefined(bookingToDelete.customInputs),
@@ -499,7 +533,11 @@ async function handler(req: CustomRequest) {
       attendees: attendeesList,
       location: bookingToDelete.location ?? "",
       uid: bookingToDelete.uid ?? "",
-      destinationCalendar: bookingToDelete?.destinationCalendar || bookingToDelete?.user.destinationCalendar,
+      destinationCalendar: bookingToDelete?.destinationCalendar
+        ? [bookingToDelete?.destinationCalendar]
+        : bookingToDelete?.user.destinationCalendar
+        ? [bookingToDelete?.user.destinationCalendar]
+        : [],
     };
 
     const successPayment = bookingToDelete.payment.find((payment) => payment.success);
@@ -510,10 +548,10 @@ async function handler(req: CustomRequest) {
     let eventTypeOwnerId;
     if (bookingToDelete.eventType?.owner) {
       eventTypeOwnerId = bookingToDelete.eventType.owner.id;
-    } else if (bookingToDelete.eventType?.teamId) {
+    } else if (bookingToDelete.eventType?.team?.id) {
       const teamOwner = await prisma.membership.findFirst({
         where: {
-          teamId: bookingToDelete.eventType.teamId,
+          teamId: bookingToDelete.eventType?.team.id,
           role: MembershipRole.OWNER,
         },
         select: {
@@ -555,7 +593,8 @@ async function handler(req: CustomRequest) {
     // Posible to refactor TODO:
     const paymentApp = (await appStore[
       paymentAppCredential?.app?.dirName as keyof typeof appStore
-    ]()) as PaymentApp;
+    ]?.()) as PaymentApp;
+
     if (!paymentApp?.lib?.PaymentService) {
       console.warn(`payment App service of type ${paymentApp} is not implemented`);
       return null;
@@ -601,11 +640,13 @@ async function handler(req: CustomRequest) {
   });
 
   // delete scheduled jobs of cancelled bookings
+  // FIXME: async calls into ether
   updatedBookings.forEach((booking) => {
     cancelScheduledJobs(booking);
   });
 
   //Workflows - cancel all reminders for cancelled bookings
+  // FIXME: async calls into ether
   updatedBookings.forEach((booking) => {
     booking.workflowReminders.forEach((reminder) => {
       if (reminder.method === WorkflowMethods.EMAIL) {
@@ -620,165 +661,21 @@ async function handler(req: CustomRequest) {
 
   const prismaPromises: Promise<unknown>[] = [bookingReferenceDeletes];
 
-  // @TODO: find a way in the future if a promise fails don't stop the rest of the promises
-  // Also if emails fails try to requeue them
   try {
-    await Promise.all(prismaPromises.concat(apiDeletes));
+    const temp = prismaPromises.concat(apiDeletes);
+    const settled = await Promise.allSettled(temp);
+    const rejected = settled.filter(({ status }) => status === "rejected") as PromiseRejectedResult[];
+    if (rejected.length) {
+      throw new Error(`Reasons: ${rejected.map(({ reason }) => reason)}`);
+    }
 
+    // TODO: if emails fail try to requeue them
     await sendCancelledEmails(evt, { eventName: bookingToDelete?.eventType?.eventName });
   } catch (error) {
     console.error("Error deleting event", error);
   }
   req.statusCode = 200;
   return { message: "Booking successfully cancelled." };
-}
-
-async function handleSeatedEventCancellation(
-  req: CustomRequest,
-  dataForWebhooks: {
-    webhooks: {
-      id: string;
-      subscriberUrl: string;
-      payloadTemplate: string | null;
-      appId: string | null;
-      secret: string | null;
-    }[];
-    evt: CalendarEvent;
-    eventTypeInfo: EventTypeInfo;
-  }
-) {
-  const { seatReferenceUid } = schemaBookingCancelParams.parse(req.body);
-  const { webhooks, evt, eventTypeInfo } = dataForWebhooks;
-  if (!seatReferenceUid) return;
-  const bookingToDelete = req.bookingToDelete;
-  if (!bookingToDelete?.attendees.length || bookingToDelete.attendees.length < 2) return;
-
-  if (!bookingToDelete.userId) {
-    throw new HttpError({ statusCode: 400, message: "User not found" });
-  }
-
-  const seatReference = bookingToDelete.seatsReferences.find(
-    (reference) => reference.referenceUid === seatReferenceUid
-  );
-
-  if (!seatReference) throw new HttpError({ statusCode: 400, message: "User not a part of this booking" });
-
-  await Promise.all([
-    prisma.bookingSeat.delete({
-      where: {
-        referenceUid: seatReferenceUid,
-      },
-    }),
-    prisma.attendee.delete({
-      where: {
-        id: seatReference.attendeeId,
-      },
-    }),
-  ]);
-  req.statusCode = 200;
-
-  const attendee = bookingToDelete?.attendees.find((attendee) => attendee.id === seatReference.attendeeId);
-
-  if (attendee) {
-    /* If there are references then we should update them as well */
-
-    const integrationsToUpdate = [];
-
-    for (const reference of bookingToDelete.references) {
-      if (reference.credentialId) {
-        const credential = await prisma.credential.findUnique({
-          where: {
-            id: reference.credentialId,
-          },
-        });
-
-        if (credential) {
-          const updatedEvt = {
-            ...evt,
-            attendees: evt.attendees.filter((evtAttendee) => attendee.email !== evtAttendee.email),
-          };
-          if (reference.type.includes("_video")) {
-            integrationsToUpdate.push(
-              updateMeeting(
-                { ...credential, appName: evt.location?.replace("integrations:", "") || "" },
-                updatedEvt,
-                reference
-              )
-            );
-          }
-          if (reference.type.includes("_calendar")) {
-            const calendar = await getCalendar(credential);
-            if (calendar) {
-              integrationsToUpdate.push(
-                calendar?.updateEvent(reference.uid, updatedEvt, reference.externalCalendarId)
-              );
-            }
-          }
-        }
-      }
-    }
-
-    try {
-      await Promise.all(integrationsToUpdate);
-    } catch (error) {
-      // Shouldn't stop code execution if integrations fail
-      // as integrations was already updated
-    }
-
-    const tAttendees = await getTranslation(attendee.locale ?? "en", "common");
-
-    await sendCancelledSeatEmails(evt, {
-      ...attendee,
-      language: { translate: tAttendees, locale: attendee.locale ?? "en" },
-    });
-  }
-
-  evt.attendees = attendee
-    ? [
-        {
-          ...attendee,
-          language: {
-            translate: await getTranslation(attendee.locale ?? "en", "common"),
-            locale: attendee.locale ?? "en",
-          },
-        },
-      ]
-    : [];
-
-  const promises = webhooks.map((webhook) =>
-    sendPayload(webhook.secret, WebhookTriggerEvents.BOOKING_CANCELLED, new Date().toISOString(), webhook, {
-      ...evt,
-      ...eventTypeInfo,
-      status: "CANCELLED",
-      smsReminderNumber: bookingToDelete.smsReminderNumber || undefined,
-    }).catch((e) => {
-      console.error(
-        `Error executing webhook for event: ${WebhookTriggerEvents.BOOKING_CANCELLED}, URL: ${webhook.subscriberUrl}`,
-        e
-      );
-    })
-  );
-  await Promise.all(promises);
-
-  const workflowRemindersForAttendee = bookingToDelete?.workflowReminders.filter(
-    (reminder) => reminder.seatReferenceId === seatReferenceUid
-  );
-
-  if (workflowRemindersForAttendee && workflowRemindersForAttendee.length !== 0) {
-    const deletionPromises = workflowRemindersForAttendee.map((reminder) => {
-      if (reminder.method === WorkflowMethods.EMAIL) {
-        return deleteScheduledEmailReminder(reminder.id, reminder.referenceId);
-      } else if (reminder.method === WorkflowMethods.SMS) {
-        return deleteScheduledSMSReminder(reminder.id, reminder.referenceId);
-      } else if (reminder.method === WorkflowMethods.WHATSAPP) {
-        return deleteScheduledWhatsappReminder(reminder.id, reminder.referenceId);
-      }
-    });
-
-    await Promise.allSettled(deletionPromises);
-  }
-
-  return { success: true };
 }
 
 export default handler;

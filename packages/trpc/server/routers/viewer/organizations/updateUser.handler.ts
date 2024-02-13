@@ -1,5 +1,7 @@
-import { isOrganisationAdmin } from "@calcom/lib/server/queries/organisations";
+import { isOrganisationAdmin, isOrganisationOwner } from "@calcom/lib/server/queries/organisations";
+import { resizeBase64Image } from "@calcom/lib/server/resizeBase64Image";
 import { prisma } from "@calcom/prisma";
+import { MembershipRole } from "@calcom/prisma/enums";
 import type { TrpcSessionUser } from "@calcom/trpc/server/trpc";
 
 import { TRPCError } from "@trpc/server";
@@ -13,6 +15,20 @@ type UpdateUserOptions = {
   input: TUpdateUserInputSchema;
 };
 
+const applyRoleToAllTeams = async (userId: number, teamIds: number[], role: MembershipRole) => {
+  await prisma.membership.updateMany({
+    where: {
+      userId,
+      teamId: {
+        in: teamIds,
+      },
+    },
+    data: {
+      role,
+    },
+  });
+};
+
 export const updateUserHandler = async ({ ctx, input }: UpdateUserOptions) => {
   const { user } = ctx;
   const { id: userId, organizationId } = user;
@@ -21,6 +37,19 @@ export const updateUserHandler = async ({ ctx, input }: UpdateUserOptions) => {
 
   if (!(await isOrganisationAdmin(userId, organizationId))) throw new TRPCError({ code: "UNAUTHORIZED" });
 
+  const isUpdaterAnOwner = await isOrganisationOwner(userId, organizationId);
+  // only OWNER can update the role to OWNER
+  if (input.role === MembershipRole.OWNER && !isUpdaterAnOwner) {
+    throw new TRPCError({ code: "UNAUTHORIZED" });
+  }
+
+  const isUserBeingUpdatedOwner = await isOrganisationOwner(input.userId, organizationId);
+
+  // only owner can update the role of another owner
+  if (isUserBeingUpdatedOwner && !isUpdaterAnOwner) {
+    throw new TRPCError({ code: "UNAUTHORIZED" });
+  }
+
   // Is requested user a member of the organization?
   const requestedMember = await prisma.membership.findFirst({
     where: {
@@ -28,10 +57,33 @@ export const updateUserHandler = async ({ ctx, input }: UpdateUserOptions) => {
       teamId: organizationId,
       accepted: true,
     },
+    include: {
+      team: {
+        include: {
+          children: {
+            where: {
+              members: {
+                some: {
+                  userId: input.userId,
+                },
+              },
+            },
+            include: {
+              members: true,
+            },
+          },
+        },
+      },
+    },
   });
 
   if (!requestedMember)
     throw new TRPCError({ code: "UNAUTHORIZED", message: "User does not belong to your organization" });
+
+  let avatar = input.avatar;
+  if (input.avatar) {
+    avatar = await resizeBase64Image(input.avatar);
+  }
 
   // Update user
   await prisma.$transaction([
@@ -44,6 +96,7 @@ export const updateUserHandler = async ({ ctx, input }: UpdateUserOptions) => {
         email: input.email,
         name: input.name,
         timeZone: input.timeZone,
+        avatar,
       },
     }),
     prisma.membership.update({
@@ -59,6 +112,13 @@ export const updateUserHandler = async ({ ctx, input }: UpdateUserOptions) => {
     }),
   ]);
 
+  if (input.role === MembershipRole.ADMIN || input.role === MembershipRole.OWNER) {
+    const teamIds = requestedMember.team.children
+      .map((sub_team) => sub_team.members.find((item) => item.userId === input.userId)?.teamId)
+      .filter(Boolean) as number[]; //filter out undefined
+
+    await applyRoleToAllTeams(input.userId, teamIds, input.role);
+  }
   // TODO: audit log this
 
   return {

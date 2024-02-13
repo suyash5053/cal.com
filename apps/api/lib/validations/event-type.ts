@@ -24,6 +24,11 @@ const hostSchema = _HostModel.pick({
   userId: true,
 });
 
+export const childrenSchema = z.object({
+  id: z.number().int(),
+  userId: z.number().int(),
+});
+
 export const schemaEventTypeBaseBodyParams = EventType.pick({
   title: true,
   description: true,
@@ -33,16 +38,19 @@ export const schemaEventTypeBaseBodyParams = EventType.pick({
   position: true,
   eventName: true,
   timeZone: true,
+  schedulingType: true,
+  // START Limit future bookings
   periodType: true,
   periodStartDate: true,
-  schedulingType: true,
   periodEndDate: true,
   periodDays: true,
   periodCountCalendarDays: true,
+  // END Limit future bookings
   requiresConfirmation: true,
   disableGuests: true,
   hideCalendarNotes: true,
   minimumBookingNotice: true,
+  parentId: true,
   beforeEventBuffer: true,
   afterEventBuffer: true,
   teamId: true,
@@ -51,8 +59,17 @@ export const schemaEventTypeBaseBodyParams = EventType.pick({
   slotInterval: true,
   successRedirectUrl: true,
   locations: true,
+  bookingLimits: true,
+  onlyShowFirstAvailableSlot: true,
+  durationLimits: true,
+  assignAllTeamMembers: true,
 })
-  .merge(z.object({ hosts: z.array(hostSchema).optional().default([]) }))
+  .merge(
+    z.object({
+      children: z.array(childrenSchema).optional().default([]),
+      hosts: z.array(hostSchema).optional().default([]),
+    })
+  )
   .partial()
   .strict();
 
@@ -66,7 +83,10 @@ const schemaEventTypeCreateParams = z
     recurringEvent: recurringEventInputSchema.optional(),
     seatsPerTimeSlot: z.number().optional(),
     seatsShowAttendees: z.boolean().optional(),
+    seatsShowAvailabilityCount: z.boolean().optional(),
     bookingFields: eventTypeBookingFields.optional(),
+    scheduleId: z.number().optional(),
+    parentId: z.number().optional(),
   })
   .strict();
 
@@ -84,7 +104,9 @@ const schemaEventTypeEditParams = z
     length: z.number().int().optional(),
     seatsPerTimeSlot: z.number().optional(),
     seatsShowAttendees: z.boolean().optional(),
+    seatsShowAvailabilityCount: z.boolean().optional(),
     bookingFields: eventTypeBookingFields.optional(),
+    scheduleId: z.number().optional(),
   })
   .strict();
 
@@ -117,15 +139,22 @@ export const schemaEventTypeReadPublic = EventType.pick({
   price: true,
   currency: true,
   slotInterval: true,
+  parentId: true,
   successRedirectUrl: true,
   description: true,
   locations: true,
   metadata: true,
   seatsPerTimeSlot: true,
   seatsShowAttendees: true,
+  seatsShowAvailabilityCount: true,
   bookingFields: true,
+  bookingLimits: true,
+  onlyShowFirstAvailableSlot: true,
+  durationLimits: true,
 }).merge(
   z.object({
+    children: z.array(childrenSchema).optional().default([]),
+    hosts: z.array(hostSchema).optional().default([]),
     locations: z
       .array(
         z.object({

@@ -1,4 +1,4 @@
-import type { Prisma, DestinationCalendar, SelectedCalendar, BookingSeat } from "@prisma/client";
+import type { BookingSeat, DestinationCalendar, Prisma, SelectedCalendar } from "@prisma/client";
 import type { Dayjs } from "dayjs";
 import type { calendar_v3 } from "googleapis";
 import type { Time } from "ical.js";
@@ -8,6 +8,7 @@ import type z from "zod";
 import type { bookingResponse } from "@calcom/features/bookings/lib/getBookingResponsesSchema";
 import type { Calendar } from "@calcom/features/calendars/weeklyview";
 import type { TimeFormat } from "@calcom/lib/timeFormat";
+import type { SchedulingType } from "@calcom/prisma/enums";
 import type { Frequency } from "@calcom/prisma/zod-utils";
 import type { CredentialPayload } from "@calcom/types/Credential";
 
@@ -38,6 +39,7 @@ export type Person = {
 };
 
 export type TeamMember = {
+  id?: number;
   name: string;
   email: string;
   timeZone: string;
@@ -53,6 +55,7 @@ export type EventBusyDate = {
 export type EventBusyDetails = EventBusyDate & {
   title?: string;
   source?: string | null;
+  userId?: number | null;
 };
 
 export type CalendarServiceType = typeof Calendar;
@@ -61,6 +64,7 @@ export type AdditionalInfo = Record<string, unknown> & { calWarnings?: string[] 
 export type NewCalendarEventType = {
   uid: string;
   id: string;
+  thirdPartyRecurringEventId?: string | null;
   type: string;
   password: string;
   url: string;
@@ -141,6 +145,10 @@ export type CalEventResponses = Record<
   }
 >;
 
+export interface ExistingRecurringEvent {
+  recurringEventId: string;
+}
+
 // If modifying this interface, probably should update builders/calendarEvent files
 export interface CalendarEvent {
   // Instead of sending this per event.
@@ -158,16 +166,19 @@ export interface CalendarEvent {
   team?: {
     name: string;
     members: TeamMember[];
+    id: number;
   };
   location?: string | null;
   conferenceCredentialId?: number;
   conferenceData?: ConferenceData;
   additionalInformation?: AdditionalInformation;
   uid?: string | null;
+  existingRecurringEvent?: ExistingRecurringEvent | null;
+  bookingId?: number;
   videoCallData?: VideoCallData;
   paymentInfo?: PaymentInfo | null;
   requiresConfirmation?: boolean | null;
-  destinationCalendar?: DestinationCalendar | null;
+  destinationCalendar?: DestinationCalendar[] | null;
   cancellationReason?: string | null;
   rejectionReason?: string | null;
   hideCalendarNotes?: boolean;
@@ -176,9 +187,12 @@ export interface CalendarEvent {
   eventTypeId?: number | null;
   appsStatus?: AppsStatus[];
   seatsShowAttendees?: boolean | null;
+  seatsShowAvailabilityCount?: boolean | null;
   attendeeSeatId?: string;
   seatsPerTimeSlot?: number | null;
+  schedulingType?: SchedulingType | null;
   iCalUID?: string | null;
+  iCalSequence?: number | null;
 
   // It has responses to all the fields(system + user)
   responses?: CalEventResponses | null;
@@ -211,12 +225,12 @@ export interface IntegrationCalendar extends Ensure<Partial<SelectedCalendar>, "
   // For displaying the connected email address
   email?: string;
   primaryEmail?: string;
-  credentialId?: number;
+  credentialId?: number | null;
   integrationTitle?: string;
 }
 
 export interface Calendar {
-  createEvent(event: CalendarEvent): Promise<NewCalendarEventType>;
+  createEvent(event: CalendarEvent, credentialId: number): Promise<NewCalendarEventType>;
 
   updateEvent(
     uid: string,

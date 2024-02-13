@@ -4,28 +4,49 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { Dispatch, ReactElement, ReactNode, SetStateAction } from "react";
-import React, { cloneElement, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import React, { cloneElement, Fragment, useEffect, useMemo, useState } from "react";
 import { Toaster } from "react-hot-toast";
 
 import dayjs from "@calcom/dayjs";
 import { useIsEmbed } from "@calcom/embed-core/embed-iframe";
 import UnconfirmedBookingBadge from "@calcom/features/bookings/UnconfirmedBookingBadge";
-import ImpersonatingBanner from "@calcom/features/ee/impersonation/components/ImpersonatingBanner";
-import { OrgUpgradeBanner } from "@calcom/features/ee/organizations/components/OrgUpgradeBanner";
-import { getOrgFullDomain } from "@calcom/features/ee/organizations/lib/orgDomains";
+import ImpersonatingBanner, {
+  type ImpersonatingBannerProps,
+} from "@calcom/features/ee/impersonation/components/ImpersonatingBanner";
+import {
+  OrgUpgradeBanner,
+  type OrgUpgradeBannerProps,
+} from "@calcom/features/ee/organizations/components/OrgUpgradeBanner";
+import { getOrgFullOrigin } from "@calcom/features/ee/organizations/lib/orgDomains";
 import HelpMenuItem from "@calcom/features/ee/support/components/HelpMenuItem";
-import { TeamsUpgradeBanner } from "@calcom/features/ee/teams/components";
+import { TeamsUpgradeBanner, type TeamsUpgradeBannerProps } from "@calcom/features/ee/teams/components";
 import { useFlagMap } from "@calcom/features/flags/context/provider";
 import { KBarContent, KBarRoot, KBarTrigger } from "@calcom/features/kbar/Kbar";
 import TimezoneChangeDialog from "@calcom/features/settings/TimezoneChangeDialog";
-import AdminPasswordBanner from "@calcom/features/users/components/AdminPasswordBanner";
-import VerifyEmailBanner from "@calcom/features/users/components/VerifyEmailBanner";
+import AdminPasswordBanner, {
+  type AdminPasswordBannerProps,
+} from "@calcom/features/users/components/AdminPasswordBanner";
+import CalendarCredentialBanner, {
+  type CalendarCredentialBannerProps,
+} from "@calcom/features/users/components/CalendarCredentialBanner";
+import UserV2OptInBanner from "@calcom/features/users/components/UserV2OptInBanner";
+import VerifyEmailBanner, {
+  type VerifyEmailBannerProps,
+} from "@calcom/features/users/components/VerifyEmailBanner";
 import classNames from "@calcom/lib/classNames";
-import { APP_NAME, DESKTOP_APP_LINK, JOIN_DISCORD, ROADMAP, WEBAPP_URL } from "@calcom/lib/constants";
-import { getPlaceholderAvatar } from "@calcom/lib/defaultAvatarImage";
+import {
+  APP_NAME,
+  DESKTOP_APP_LINK,
+  JOIN_DISCORD,
+  ROADMAP,
+  WEBAPP_URL,
+  IS_VISUAL_REGRESSION_TESTING,
+  TOP_BANNER_HEIGHT,
+  ENABLE_PROFILE_SWITCHER,
+} from "@calcom/lib/constants";
+import { useFormbricks } from "@calcom/lib/formbricks-client";
 import getBrandColours from "@calcom/lib/getBrandColours";
 import { useBookerUrl } from "@calcom/lib/hooks/useBookerUrl";
-import { useIsomorphicLayoutEffect } from "@calcom/lib/hooks/useIsomorphicLayoutEffect";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { isKeyInObject } from "@calcom/lib/isKeyInObject";
 import type { User } from "@calcom/prisma/client";
@@ -75,6 +96,7 @@ import {
   User as UserIcon,
   Users,
   Zap,
+  Check,
 } from "@calcom/ui/components/icon";
 import { Discord } from "@calcom/ui/components/icon/Discord";
 
@@ -99,7 +121,9 @@ export const ONBOARDING_NEXT_REDIRECT = {
 } as const;
 
 export const shouldShowOnboarding = (
-  user: Pick<User, "createdDate" | "completedOnboarding" | "organizationId">
+  user: Pick<User, "createdDate" | "completedOnboarding"> & {
+    organizationId: number | null;
+  }
 ) => {
   return (
     !user.completedOnboarding &&
@@ -131,38 +155,29 @@ function useRedirectToLoginIfUnauthenticated(isPublic = false) {
   };
 }
 
-function AppTop({ setBannersHeight }: { setBannersHeight: Dispatch<SetStateAction<number>> }) {
-  const bannerRef = useRef<HTMLDivElement | null>(null);
+type BannerTypeProps = {
+  teamUpgradeBanner: TeamsUpgradeBannerProps;
+  orgUpgradeBanner: OrgUpgradeBannerProps;
+  verifyEmailBanner: VerifyEmailBannerProps;
+  adminPasswordBanner: AdminPasswordBannerProps;
+  impersonationBanner: ImpersonatingBannerProps;
+  calendarCredentialBanner: CalendarCredentialBannerProps;
+};
 
-  useIsomorphicLayoutEffect(() => {
-    const resizeObserver = new ResizeObserver((entries) => {
-      const { offsetHeight } = entries[0].target as HTMLElement;
-      setBannersHeight(offsetHeight);
-    });
+type BannerType = keyof BannerTypeProps;
 
-    const currentBannerRef = bannerRef.current;
+type BannerComponent = {
+  [Key in BannerType]: (props: BannerTypeProps[Key]) => JSX.Element;
+};
 
-    if (currentBannerRef) {
-      resizeObserver.observe(currentBannerRef);
-    }
-
-    return () => {
-      if (currentBannerRef) {
-        resizeObserver.unobserve(currentBannerRef);
-      }
-    };
-  }, [bannerRef]);
-
-  return (
-    <div ref={bannerRef} className="sticky top-0 z-10 w-full divide-y divide-black">
-      <TeamsUpgradeBanner />
-      <OrgUpgradeBanner />
-      <ImpersonatingBanner />
-      <AdminPasswordBanner />
-      <VerifyEmailBanner />
-    </div>
-  );
-}
+const BannerComponent: BannerComponent = {
+  teamUpgradeBanner: (props: TeamsUpgradeBannerProps) => <TeamsUpgradeBanner {...props} />,
+  orgUpgradeBanner: (props: OrgUpgradeBannerProps) => <OrgUpgradeBanner {...props} />,
+  verifyEmailBanner: (props: VerifyEmailBannerProps) => <VerifyEmailBanner {...props} />,
+  adminPasswordBanner: (props: AdminPasswordBannerProps) => <AdminPasswordBanner {...props} />,
+  impersonationBanner: (props: ImpersonatingBannerProps) => <ImpersonatingBanner {...props} />,
+  calendarCredentialBanner: (props: CalendarCredentialBannerProps) => <CalendarCredentialBanner {...props} />,
+};
 
 function useRedirectToOnboardingIfNeeded() {
   const router = useRouter();
@@ -188,16 +203,49 @@ function useRedirectToOnboardingIfNeeded() {
   };
 }
 
+type allBannerProps = { [Key in BannerType]: BannerTypeProps[Key]["data"] };
+
+const useBanners = () => {
+  const { data: getUserTopBanners, isPending } = trpc.viewer.getUserTopBanners.useQuery();
+  const { data: userSession } = useSession();
+
+  if (isPending || !userSession) return null;
+
+  const isUserInactiveAdmin = userSession?.user.role === "INACTIVE_ADMIN";
+  const userImpersonatedByUID = userSession?.user.impersonatedBy?.id;
+
+  const userSessionBanners = {
+    adminPasswordBanner: isUserInactiveAdmin ? userSession : null,
+    impersonationBanner: userImpersonatedByUID ? userSession : null,
+  };
+
+  const allBanners: allBannerProps = Object.assign({}, getUserTopBanners, userSessionBanners);
+
+  return allBanners;
+};
+
 const Layout = (props: LayoutProps) => {
-  const [bannersHeight, setBannersHeight] = useState<number>(0);
+  const banners = useBanners();
+
   const pageTitle = typeof props.heading === "string" && !props.title ? props.heading : props.title;
+
+  const bannersHeight = useMemo(() => {
+    const activeBanners =
+      banners &&
+      Object.entries(banners).filter(([_, value]) => {
+        return value && (!Array.isArray(value) || value.length > 0);
+      });
+    return (activeBanners?.length ?? 0) * TOP_BANNER_HEIGHT;
+  }, [banners]);
+
+  useFormbricks();
 
   return (
     <>
       {!props.withoutSeo && (
         <HeadSeo
           title={pageTitle ?? APP_NAME}
-          description={props.subtitle ? props.subtitle?.toString() : ""}
+          description={props.description ?? props.subtitle?.toString() ?? ""}
         />
       )}
       <div>
@@ -207,7 +255,33 @@ const Layout = (props: LayoutProps) => {
       {/* todo: only run this if timezone is different */}
       <TimezoneChangeDialog />
       <div className="flex min-h-screen flex-col">
-        <AppTop setBannersHeight={setBannersHeight} />
+        {banners && (
+          <div className="sticky top-0 z-10 w-full divide-y divide-black">
+            <UserV2OptInBanner />
+            {Object.keys(banners).map((key) => {
+              if (key === "teamUpgradeBanner") {
+                const Banner = BannerComponent[key];
+                return <Banner data={banners[key]} key={key} />;
+              } else if (key === "orgUpgradeBanner") {
+                const Banner = BannerComponent[key];
+                return <Banner data={banners[key]} key={key} />;
+              } else if (key === "verifyEmailBanner") {
+                const Banner = BannerComponent[key];
+                return <Banner data={banners[key]} key={key} />;
+              } else if (key === "adminPasswordBanner") {
+                const Banner = BannerComponent[key];
+                return <Banner data={banners[key]} key={key} />;
+              } else if (key === "impersonationBanner") {
+                const Banner = BannerComponent[key];
+                return <Banner data={banners[key]} key={key} />;
+              } else if (key === "calendarCredentialBanner") {
+                const Banner = BannerComponent[key];
+                return <Banner data={banners[key]} key={key} />;
+              }
+            })}
+          </div>
+        )}
+
         <div className="flex flex-1" data-testid="dashboard-shell">
           {props.SidebarContainer ? (
             cloneElement(props.SidebarContainer, { bannersHeight })
@@ -228,6 +302,7 @@ type DrawerState = [isOpen: boolean, setDrawerOpen: Dispatch<SetStateAction<bool
 type LayoutProps = {
   centered?: boolean;
   title?: string;
+  description?: string;
   heading?: ReactNode;
   subtitle?: ReactNode;
   headerClassName?: string;
@@ -361,18 +436,19 @@ function UserDropdown({ small }: UserDropdownProps) {
     <Dropdown open={menuOpen}>
       <DropdownMenuTrigger asChild onClick={() => setMenuOpen((menuOpen) => !menuOpen)}>
         <button
+          data-testid="user-dropdown-trigger-button"
           className={classNames(
-            "hover:bg-emphasis group mx-0 flex cursor-pointer appearance-none items-center rounded-full text-left outline-none focus:outline-none focus:ring-0 md:rounded-none lg:rounded",
+            "hover:bg-emphasis todesktop:!bg-transparent group mx-0 flex w-full cursor-pointer appearance-none items-center rounded-full text-left outline-none transition focus:outline-none focus:ring-0 md:rounded-none lg:rounded",
             small ? "p-2" : "px-2 py-1.5"
           )}>
           <span
             className={classNames(
               small ? "h-4 w-4" : "h-5 w-5 ltr:mr-2 rtl:ml-2",
-              "relative flex-shrink-0 rounded-full bg-gray-300"
+              "relative flex-shrink-0 rounded-full "
             )}>
             <Avatar
               size={small ? "xs" : "xsm"}
-              imageSrc={bookerUrl + "/" + user.username + "/avatar.png"}
+              imageSrc={`${user.avatarUrl || user.avatar}`}
               alt={user.username || "Nameless User"}
               className="overflow-hidden"
             />
@@ -437,10 +513,8 @@ function UserDropdown({ small }: UserDropdownProps) {
                     StartIcon={(props) => (
                       <Moon className={classNames("text-default", props.className)} aria-hidden="true" />
                     )}
-                    onClick={() => {
-                      mutation.mutate({ away: !user.away });
-                    }}>
-                    {user.away ? t("set_as_free") : t("set_as_away")}
+                    href="/settings/my-account/out-of-office">
+                    {t("out_of_office")}
                   </DropdownItem>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -466,7 +540,7 @@ function UserDropdown({ small }: UserDropdownProps) {
                     {t("help")}
                   </DropdownItem>
                 </DropdownMenuItem>
-                <DropdownMenuItem className="desktop-hidden hidden lg:flex">
+                <DropdownMenuItem className="todesktop:hidden hidden lg:flex">
                   <DropdownItem StartIcon={Download} target="_blank" rel="noreferrer" href={DESKTOP_APP_LINK}>
                     {t("download_desktop_app")}
                   </DropdownItem>
@@ -509,7 +583,7 @@ export type NavigationItemType = {
   }: {
     item: Pick<NavigationItemType, "href">;
     isChild?: boolean;
-    pathname: string;
+    pathname: string | null;
   }) => boolean;
 };
 
@@ -527,7 +601,7 @@ const navigation: NavigationItemType[] = [
     href: "/bookings/upcoming",
     icon: Calendar,
     badge: <UnconfirmedBookingBadge />,
-    isCurrent: ({ pathname }) => pathname?.startsWith("/bookings"),
+    isCurrent: ({ pathname }) => pathname?.startsWith("/bookings") ?? false,
   },
   {
     name: "availability",
@@ -547,7 +621,7 @@ const navigation: NavigationItemType[] = [
     icon: Grid,
     isCurrent: ({ pathname: path, item }) => {
       // During Server rendering path is /v2/apps but on client it becomes /apps(weird..)
-      return path?.startsWith(item.href) && !path?.includes("routing-forms/");
+      return (path?.startsWith(item.href) ?? false) && !(path?.includes("routing-forms/") ?? false);
     },
     child: [
       {
@@ -556,7 +630,9 @@ const navigation: NavigationItemType[] = [
         isCurrent: ({ pathname: path, item }) => {
           // During Server rendering path is /v2/apps but on client it becomes /apps(weird..)
           return (
-            path?.startsWith(item.href) && !path?.includes("routing-forms/") && !path?.includes("/installed")
+            (path?.startsWith(item.href) ?? false) &&
+            !(path?.includes("routing-forms/") ?? false) &&
+            !(path?.includes("/installed") ?? false)
           );
         },
       },
@@ -564,7 +640,8 @@ const navigation: NavigationItemType[] = [
         name: "installed_apps",
         href: "/apps/installed/calendar",
         isCurrent: ({ pathname: path }) =>
-          path?.startsWith("/apps/installed/") || path?.startsWith("/v2/apps/installed/"),
+          (path?.startsWith("/apps/installed/") ?? false) ||
+          (path?.startsWith("/v2/apps/installed/") ?? false),
       },
     ],
   },
@@ -577,7 +654,7 @@ const navigation: NavigationItemType[] = [
     name: "Routing Forms",
     href: "/apps/routing-forms/forms",
     icon: FileText,
-    isCurrent: ({ pathname }) => pathname?.startsWith("/apps/routing-forms/"),
+    isCurrent: ({ pathname }) => pathname?.startsWith("/apps/routing-forms/") ?? false,
   },
   {
     name: "workflows",
@@ -631,7 +708,7 @@ function useShouldDisplayNavigationItem(item: NavigationItemType) {
 }
 
 const defaultIsCurrent: NavigationItemType["isCurrent"] = ({ isChild, item, pathname }) => {
-  return isChild ? item.href === pathname : item.href ? pathname?.startsWith(item.href) : false;
+  return isChild ? item.href === pathname : item.href ? pathname?.startsWith(item.href) ?? false : false;
 };
 
 const NavigationItem: React.FC<{
@@ -655,30 +732,32 @@ const NavigationItem: React.FC<{
           href={item.href}
           aria-label={t(item.name)}
           className={classNames(
-            "text-default group flex items-center rounded-md px-2 py-1.5 text-sm font-medium",
-            item.child ? `[&[aria-current='page']]:bg-transparent` : `[&[aria-current='page']]:bg-emphasis`,
+            "todesktop:py-[7px] text-default group flex items-center rounded-md px-2 py-1.5 text-sm font-medium transition",
+            item.child ? `[&[aria-current='page']]:!bg-transparent` : `[&[aria-current='page']]:bg-emphasis`,
             isChild
               ? `[&[aria-current='page']]:text-emphasis [&[aria-current='page']]:bg-emphasis hidden h-8 pl-16 lg:flex lg:pl-11 ${
                   props.index === 0 ? "mt-0" : "mt-px"
                 }`
               : "[&[aria-current='page']]:text-emphasis mt-0.5 text-sm",
-            isLocaleReady ? "hover:bg-emphasis hover:text-emphasis" : ""
+            isLocaleReady
+              ? "hover:bg-subtle todesktop:[&[aria-current='page']]:bg-emphasis todesktop:hover:bg-transparent hover:text-emphasis"
+              : ""
           )}
           aria-current={current ? "page" : undefined}>
           {item.icon && (
             <item.icon
-              className="mr-2 h-4 w-4 flex-shrink-0 ltr:mr-2 rtl:ml-2 [&[aria-current='page']]:text-inherit"
+              className="todesktop:!text-blue-500 mr-2 h-4 w-4 flex-shrink-0 rtl:ml-2 md:ltr:mx-auto lg:ltr:mr-2 [&[aria-current='page']]:text-inherit"
               aria-hidden="true"
               aria-current={current ? "page" : undefined}
             />
           )}
           {isLocaleReady ? (
-            <span className="hidden w-full justify-between lg:flex">
+            <span className="hidden w-full justify-between lg:flex" data-testid={`${item.name}-test`}>
               <div className="flex">{t(item.name)}</div>
               {item.badge && item.badge}
             </span>
           ) : (
-            <SkeletonText style={{ width: `${item.name.length * 10}px` }} className="h-[20px]" />
+            <SkeletonText className="h-[20px] w-full" />
           )}
         </Link>
       </Tooltip>
@@ -702,7 +781,7 @@ const MobileNavigation = () => {
     <>
       <nav
         className={classNames(
-          "pwa:pb-2.5 bg-muted border-subtle fixed bottom-0 z-30 -mx-4 flex w-full border-t bg-opacity-40 px-1 shadow backdrop-blur-md md:hidden",
+          "pwa:pb-[max(0.625rem,env(safe-area-inset-bottom))] pwa:-mx-2 bg-muted border-subtle fixed bottom-0 left-0 z-30 flex w-full border-t bg-opacity-40 px-1 shadow backdrop-blur-md md:hidden",
           isEmbed && "hidden"
         )}>
         {mobileNavigationBottomItems.map((item) => (
@@ -758,7 +837,7 @@ const MobileNavigationMoreItem: React.FC<{
 
   return (
     <li className="border-subtle border-b last:border-b-0" key={item.name}>
-      <Link href={item.href} className="hover:bg-subtle flex items-center justify-between p-5">
+      <Link href={item.href} className="hover:bg-subtle flex items-center justify-between p-5 transition">
         <span className="text-default flex items-center font-semibold ">
           {item.icon && <item.icon className="h-5 w-5 flex-shrink-0 ltr:mr-3 rtl:ml-3" aria-hidden="true" />}
           {isLocaleReady ? t(item.name) : <SkeletonText />}
@@ -791,13 +870,12 @@ function SideBarContainer({ bannersHeight }: SideBarContainerProps) {
 function SideBar({ bannersHeight, user }: SideBarProps) {
   const { t, isLocaleReady } = useLocale();
   const orgBranding = useOrgBranding();
-  const isOrgBrandingDataFetched = orgBranding !== undefined;
 
   const publicPageUrl = useMemo(() => {
-    if (!user?.organizationId) return `${process.env.NEXT_PUBLIC_WEBSITE_URL}/${user?.username}`;
-    const publicPageUrl = orgBranding?.slug ? getOrgFullDomain(orgBranding.slug) : "";
+    if (!user?.org?.id) return `${process.env.NEXT_PUBLIC_WEBSITE_URL}/${user?.username}`;
+    const publicPageUrl = orgBranding?.slug ? getOrgFullOrigin(orgBranding.slug) : "";
     return publicPageUrl;
-  }, [orgBranding?.slug, user?.organizationId, user?.username]);
+  }, [orgBranding?.slug, user?.username, user?.org?.id]);
 
   const bottomNavItems: NavigationItemType[] = [
     {
@@ -818,7 +896,7 @@ function SideBar({ bannersHeight, user }: SideBarProps) {
     },
     {
       name: "settings",
-      href: user?.organizationId ? `/settings/organizations/profile` : "/settings/my-account/profile",
+      href: user?.org ? `/settings/organizations/profile` : "/settings/my-account/profile",
       icon: Settings,
     },
   ];
@@ -826,24 +904,28 @@ function SideBar({ bannersHeight, user }: SideBarProps) {
     <div className="relative">
       <aside
         style={{ maxHeight: `calc(100vh - ${bannersHeight}px)`, top: `${bannersHeight}px` }}
-        className="desktop-transparent bg-muted border-muted fixed left-0 hidden h-full max-h-screen w-14 flex-col overflow-y-auto overflow-x-hidden border-r dark:bg-gradient-to-tr dark:from-[#2a2a2a] dark:to-[#1c1c1c] md:sticky md:flex lg:w-56 lg:px-3">
+        className="todesktop:!bg-transparent bg-muted border-muted fixed left-0 hidden h-full max-h-screen w-14 flex-col overflow-y-auto overflow-x-hidden border-r md:sticky md:flex lg:w-56 lg:px-3">
         <div className="flex h-full flex-col justify-between py-3 lg:pt-4">
-          <header className="items-center justify-between md:hidden lg:flex">
-            {!isOrgBrandingDataFetched ? null : orgBranding ? (
-              <Link href="/settings/organizations/profile" className="px-1.5">
-                <div className="flex items-center gap-2 font-medium">
-                  <Avatar
-                    alt={`${orgBranding.name} logo`}
-                    imageSrc={getPlaceholderAvatar(orgBranding.logo, orgBranding.name)}
-                    size="xsm"
-                  />
-                  <p className="text line-clamp-1 text-sm">
-                    <span>{orgBranding.name}</span>
-                  </p>
-                </div>
-              </Link>
+          <header className="todesktop:-mt-3 todesktop:flex-col-reverse todesktop:[-webkit-app-region:drag] items-center justify-between md:hidden lg:flex">
+            {orgBranding ? (
+              !ENABLE_PROFILE_SWITCHER ? (
+                <Link href="/settings/organizations/profile" className="w-full px-1.5">
+                  <div className="flex items-center gap-2 font-medium">
+                    <Avatar
+                      alt={`${orgBranding.name} logo`}
+                      imageSrc={`${orgBranding.fullDomain}/org/${orgBranding.slug}/avatar.png`}
+                      size="xsm"
+                    />
+                    <p className="text line-clamp-1 text-sm">
+                      <span>{orgBranding.name}</span>
+                    </p>
+                  </div>
+                </Link>
+              ) : (
+                <ProfileDropdown />
+              )
             ) : (
-              <div data-testid="user-dropdown-trigger">
+              <div data-testid="user-dropdown-trigger" className="todesktop:mt-4 w-full">
                 <span className="hidden lg:inline">
                   <UserDropdown />
                 </span>
@@ -852,17 +934,17 @@ function SideBar({ bannersHeight, user }: SideBarProps) {
                 </span>
               </div>
             )}
-            <div className="flex space-x-0.5 rtl:space-x-reverse">
+            <div className="flex justify-end rtl:space-x-reverse">
               <button
                 color="minimal"
                 onClick={() => window.history.back()}
-                className="desktop-only hover:text-emphasis text-subtle group flex text-sm font-medium">
+                className="todesktop:block hover:text-emphasis text-subtle group hidden text-sm font-medium">
                 <ArrowLeft className="group-hover:text-emphasis text-subtle h-4 w-4 flex-shrink-0" />
               </button>
               <button
                 color="minimal"
                 onClick={() => window.history.forward()}
-                className="desktop-only hover:text-emphasis text-subtle group flex text-sm font-medium">
+                className="todesktop:block hover:text-emphasis text-subtle group hidden text-sm font-medium">
                 <ArrowRight className="group-hover:text-emphasis text-subtle h-4 w-4 flex-shrink-0" />
               </button>
               {!!orgBranding && (
@@ -873,8 +955,6 @@ function SideBar({ bannersHeight, user }: SideBarProps) {
               <KBarTrigger />
             </div>
           </header>
-
-          <hr className="desktop-only border-subtle absolute -left-3 -right-3 mt-4 block w-full" />
 
           {/* logo icon for tablet */}
           <Link href="/event-types" className="text-center md:inline lg:hidden">
@@ -895,7 +975,7 @@ function SideBar({ bannersHeight, user }: SideBarProps) {
                 target={item.target}
                 className={classNames(
                   "text-left",
-                  "[&[aria-current='page']]:bg-emphasis  text-default justify-right group flex items-center rounded-md px-2 py-1.5 text-sm font-medium",
+                  "[&[aria-current='page']]:bg-emphasis text-default justify-right group flex items-center rounded-md px-2 py-1.5 text-sm font-medium transition",
                   "[&[aria-current='page']]:text-emphasis mt-0.5 w-full text-sm",
                   isLocaleReady ? "hover:bg-emphasis hover:text-emphasis" : "",
                   index === 0 && "mt-3"
@@ -905,7 +985,7 @@ function SideBar({ bannersHeight, user }: SideBarProps) {
                   <Icon
                     className={classNames(
                       "h-4 w-4 flex-shrink-0 [&[aria-current='page']]:text-inherit",
-                      "me-3 md:ltr:mr-2 md:rtl:ml-2"
+                      "me-3 md:mx-auto lg:ltr:mr-2 lg:rtl:ml-2"
                     )}
                     aria-hidden="true"
                   />
@@ -915,12 +995,12 @@ function SideBar({ bannersHeight, user }: SideBarProps) {
                     <div className="flex">{t(item.name)}</div>
                   </span>
                 ) : (
-                  <SkeletonText style={{ width: `${item.name.length * 10}px` }} className="h-[20px]" />
+                  <SkeletonText className="h-[20px] w-full" />
                 )}
               </ButtonOrLink>
             </Tooltip>
           ))}
-          <Credits />
+          {!IS_VISUAL_REGRESSION_TESTING && <Credits />}
         </div>
       </aside>
     </div>
@@ -970,7 +1050,7 @@ export function ShellMain(props: LayoutProps) {
                   </h3>
                 )}
                 {props.subtitle && (
-                  <p className="text-default hidden text-sm md:block">
+                  <p className="text-default hidden text-sm md:block" data-testid="subtitle">
                     {!isLocaleReady ? <SkeletonText invisible /> : props.subtitle}
                   </p>
                 )}
@@ -981,8 +1061,8 @@ export function ShellMain(props: LayoutProps) {
                   className={classNames(
                     props.backPath
                       ? "relative"
-                      : "pwa:bottom-24 fixed bottom-20 z-40 ltr:right-4 rtl:left-4 md:z-auto md:ltr:right-0 md:rtl:left-0",
-                    "flex-shrink-0 md:relative md:bottom-auto md:right-auto"
+                      : "pwa:bottom-[max(7rem,_calc(5rem_+_env(safe-area-inset-bottom)))] fixed bottom-20 z-40 ltr:right-4 rtl:left-4 md:z-auto md:ltr:right-0 md:rtl:left-0",
+                    "flex-shrink-0 [-webkit-app-region:no-drag] md:relative md:bottom-auto md:right-auto"
                   )}>
                   {isLocaleReady && props.CTA}
                 </div>
@@ -1009,7 +1089,7 @@ function MainContainer({
     <main className="bg-default relative z-0 flex-1 focus:outline-none">
       {/* show top navigation for md and smaller (tablet and phones) */}
       {TopNavContainerProp}
-      <div className="max-w-full px-4 py-4 md:py-8 lg:px-12">
+      <div className="max-w-full px-2 py-4 lg:px-6">
         <ErrorBoundary>
           {!props.withoutMain ? <ShellMain {...props}>{props.children}</ShellMain> : props.children}
         </ErrorBoundary>
@@ -1061,3 +1141,93 @@ export const MobileNavigationMoreItems = () => (
     ))}
   </ul>
 );
+
+function ProfileDropdown() {
+  const { update, data: sessionData } = useSession();
+  const { data } = trpc.viewer.me.useQuery();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  if (!data || !ENABLE_PROFILE_SWITCHER || !sessionData) {
+    return null;
+  }
+  const options = data.profiles.map((profile) => {
+    let label;
+    if (profile.organization) {
+      label = profile.organization.name;
+    } else {
+      label = sessionData.user.name;
+    }
+
+    return {
+      label,
+      value: profile.upId,
+    };
+  });
+
+  const currentOption = options.find((option) => option.value === sessionData.upId) || options[0];
+
+  return (
+    <Dropdown open={menuOpen}>
+      <DropdownMenuTrigger asChild onClick={() => setMenuOpen((menuOpen) => !menuOpen)}>
+        <button
+          data-testid="user-dropdown-trigger-button"
+          className={classNames(
+            "hover:bg-emphasis todesktop:!bg-transparent group mx-0 flex w-full cursor-pointer appearance-none items-center rounded-full px-2 py-1.5 text-left outline-none transition focus:outline-none focus:ring-0 md:rounded-none lg:rounded"
+          )}>
+          <span className="flex w-full flex-grow items-center justify-around gap-2 text-sm font-medium leading-none">
+            <Avatar alt={currentOption.label || ""} size="xsm" />
+            <span className="block w-20 overflow-hidden overflow-ellipsis whitespace-nowrap">
+              {currentOption.label}
+            </span>
+            <ChevronDown
+              className="group-hover:text-subtle text-muted h-4 w-4 flex-shrink-0 rtl:mr-4"
+              aria-hidden="true"
+            />
+          </span>
+        </button>
+      </DropdownMenuTrigger>
+
+      <DropdownMenuPortal>
+        <DropdownMenuContent
+          align="start"
+          onInteractOutside={() => {
+            setMenuOpen(false);
+          }}
+          className="min-w-56 hariom group overflow-hidden rounded-md">
+          <DropdownMenuItem className="p-3 uppercase">
+            <span>Switch to</span>
+          </DropdownMenuItem>
+          {options.map((option) => {
+            const isSelected = currentOption.value === option.value;
+            return (
+              <DropdownMenuItem
+                key={option.value}
+                onClick={() => {
+                  setMenuOpen(false);
+                  if (isSelected) return;
+                  update({
+                    upId: option.value,
+                  }).then(() => {
+                    window.location.reload();
+                  });
+                }}
+                className={classNames("flex w-full", isSelected ? "bg-subtle text-emphasis" : "")}>
+                <DropdownItem
+                  type="button"
+                  childrenClassName={classNames("flex w-full justify-between items-center")}>
+                  <span>
+                    <Avatar alt={option.label || ""} size="xsm" />
+                    <span className="ml-2">{option.label}</span>
+                  </span>
+                  {isSelected ? <Check className="ml-2 inline h-4 w-4" aria-hidden="true" /> : null}
+                </DropdownItem>
+              </DropdownMenuItem>
+            );
+          })}
+
+          {/* <DropdownMenuSeparator /> */}
+        </DropdownMenuContent>
+      </DropdownMenuPortal>
+    </Dropdown>
+  );
+}

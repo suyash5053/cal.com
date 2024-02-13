@@ -1,10 +1,11 @@
+"use client";
+
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
 
-import { getLayout } from "@calcom/features/MainLayout";
-import { ShellMain } from "@calcom/features/shell/Shell";
+import Shell from "@calcom/features/shell/Shell";
 import { classNames } from "@calcom/lib";
 import { WEBAPP_URL } from "@calcom/lib/constants";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
@@ -34,7 +35,7 @@ function WorkflowsPage() {
 
   const createMutation = trpc.viewer.workflows.create.useMutation({
     onSuccess: async ({ workflow }) => {
-      await router.replace("/workflows/" + workflow.id);
+      await router.replace(`/workflows/${workflow.id}`);
     },
     onError: (err) => {
       if (err instanceof HttpError) {
@@ -50,10 +51,12 @@ function WorkflowsPage() {
   });
 
   return (
-    <ShellMain
+    <Shell
+      withoutMain={false}
       heading={t("workflows")}
-      title={t("workflows")}
       subtitle={t("workflows_to_automate_notifications")}
+      title="Workflows"
+      description="Create workflows to automate notifications and reminders."
       hideHeadingOnMobile
       CTA={
         session.data?.hasValidLicense ? (
@@ -62,7 +65,7 @@ function WorkflowsPage() {
             createFunction={(teamId?: number) => {
               createMutation.mutate({ teamId });
             }}
-            isLoading={createMutation.isLoading}
+            isPending={createMutation.isPending}
             disableMobileButton={true}
             onlyShowWithNoTeams={true}
           />
@@ -77,7 +80,7 @@ function WorkflowsPage() {
                 <CreateButtonWithTeamsList
                   subtitle={t("new_workflow_subtitle").toUpperCase()}
                   createFunction={(teamId?: number) => createMutation.mutate({ teamId })}
-                  isLoading={createMutation.isLoading}
+                  isPending={createMutation.isPending}
                   disableMobileButton={true}
                   onlyShowWithTeams={true}
                 />
@@ -93,7 +96,7 @@ function WorkflowsPage() {
           </FilterResults>
         </>
       </LicenseRequired>
-    </ShellMain>
+    </Shell>
   );
 }
 
@@ -120,7 +123,7 @@ const Filter = (props: {
   const userId = session.data?.user.id || 0;
   const user = session.data?.user.name || "";
   const userName = session.data?.user.username;
-  const userAvatar = WEBAPP_URL + "/" + userName + "/avatar.png";
+  const userAvatar = `${WEBAPP_URL}/${userName}/avatar.png`;
 
   const teams = props.profiles.filter((profile) => !!profile.teamId);
   const { checked, setChecked } = props;
@@ -135,7 +138,6 @@ const Filter = (props: {
             imageSrc={userAvatar || ""}
             size="sm"
             alt={`${user} Avatar`}
-            gravatarFallbackMd5="fallback"
             className="self-center"
             asChild
           />
@@ -148,7 +150,7 @@ const Filter = (props: {
           <input
             id="yourWorkflows"
             type="checkbox"
-            className="text-primary-600 focus:ring-primary-500 border-default inline-flex h-4 w-4 place-self-center justify-self-end rounded "
+            className="text-emphasis focus:ring-emphasis dark:text-muted border-default inline-flex h-4 w-4 place-self-center justify-self-end rounded "
             checked={!!checked.userId}
             onChange={(e) => {
               if (e.target.checked) {
@@ -172,7 +174,6 @@ const Filter = (props: {
               imageSrc={profile.image || ""}
               size="sm"
               alt={`${profile.slug} Avatar`}
-              gravatarFallbackMd5="fallback"
               className="self-center"
               asChild
             />
@@ -213,7 +214,7 @@ const Filter = (props: {
                   }
                 }
               }}
-              className="text-primary-600 focus:ring-primary-500 border-default inline-flex h-4 w-4 place-self-center justify-self-end rounded "
+              className="text-emphasis focus:ring-emphasis dark:text-muted border-default inline-flex h-4 w-4 place-self-center justify-self-end rounded "
             />
           </div>
         ))}
@@ -221,7 +222,5 @@ const Filter = (props: {
     </div>
   );
 };
-
-WorkflowsPage.getLayout = getLayout;
 
 export default WorkflowsPage;

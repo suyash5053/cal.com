@@ -37,14 +37,14 @@ export function ScheduleListItem({
 }) {
   const { t, i18n } = useLocale();
 
-  const { data, isLoading } = trpc.viewer.availability.schedule.get.useQuery({ scheduleId: schedule.id });
+  const { data, isPending } = trpc.viewer.availability.schedule.get.useQuery({ scheduleId: schedule.id });
 
   return (
     <li key={schedule.id}>
-      <div className="hover:bg-muted flex items-center justify-between py-5 ltr:pl-4 rtl:pr-4 sm:ltr:pl-0 sm:rtl:pr-0">
+      <div className="hover:bg-muted flex items-center justify-between py-5 transition ltr:pl-4 rtl:pr-4 sm:ltr:pl-0 sm:rtl:pr-0">
         <div className="group flex w-full items-center justify-between sm:px-6">
           <Link
-            href={"/availability/" + schedule.id}
+            href={`/availability/${schedule.id}`}
             className="flex-grow truncate text-sm"
             title={schedule.name}>
             <div className="space-x-2 rtl:space-x-reverse">
@@ -87,7 +87,7 @@ export function ScheduleListItem({
               StartIcon={MoreHorizontal}
             />
           </DropdownMenuTrigger>
-          {!isLoading && data && (
+          {!isPending && data && (
             <DropdownMenuContent>
               <DropdownMenuItem className="min-w-40 focus:ring-muted">
                 {!schedule.isDefault && (
@@ -107,7 +107,7 @@ export function ScheduleListItem({
               <DropdownMenuItem className="outline-none">
                 <DropdownItem
                   type="button"
-                  data-testid={"schedule-duplicate" + schedule.id}
+                  data-testid={`schedule-duplicate${schedule.id}`}
                   StartIcon={Copy}
                   onClick={() => {
                     duplicateFunction({

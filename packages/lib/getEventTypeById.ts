@@ -1,35 +1,42 @@
-import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 
 import { getLocationGroupedOptions } from "@calcom/app-store/server";
-import type { StripeData } from "@calcom/app-store/stripepayment/lib/server";
 import { getEventTypeAppData } from "@calcom/app-store/utils";
 import type { LocationObject } from "@calcom/core/location";
 import { getBookingFieldsWithSystemFields } from "@calcom/features/bookings/lib/getBookingFields";
 import { parseBookingLimit, parseDurationLimit, parseRecurringEvent } from "@calcom/lib";
-import { CAL_URL } from "@calcom/lib/constants";
-import getPaymentAppData from "@calcom/lib/getPaymentAppData";
+import { getUserAvatarUrl } from "@calcom/lib/getAvatarUrl";
 import { getTranslation } from "@calcom/lib/server/i18n";
-import { SchedulingType, MembershipRole, AppCategories } from "@calcom/prisma/enums";
+import { UserRepository } from "@calcom/lib/server/repository/user";
+import type { PrismaClient } from "@calcom/prisma";
+import { SchedulingType, MembershipRole } from "@calcom/prisma/enums";
 import { customInputSchema, EventTypeMetaDataSchema } from "@calcom/prisma/zod-utils";
 
 import { TRPCError } from "@trpc/server";
+
+import { WEBSITE_URL } from "./constants";
+import { getBookerBaseUrl } from "./getBookerUrl/server";
 
 interface getEventTypeByIdProps {
   eventTypeId: number;
   userId: number;
   prisma: PrismaClient;
   isTrpcCall?: boolean;
+  isUserOrganizationAdmin: boolean;
+  currentOrganizationId: number | null;
 }
 
 export default async function getEventTypeById({
+  currentOrganizationId,
   eventTypeId,
   userId,
   prisma,
   isTrpcCall = false,
+  isUserOrganizationAdmin,
 }: getEventTypeByIdProps) {
   const userSelect = Prisma.validator<Prisma.UserSelect>()({
     name: true,
+    avatarUrl: true,
     username: true,
     id: true,
     email: true,
@@ -74,6 +81,7 @@ export default async function getEventTypeById({
       slug: true,
       description: true,
       length: true,
+      isInstantEvent: true,
       offsetStart: true,
       hidden: true,
       locations: true,
@@ -86,6 +94,7 @@ export default async function getEventTypeById({
       periodStartDate: true,
       periodEndDate: true,
       periodCountCalendarDays: true,
+      lockTimeZoneToggleOnBookingPage: true,
       requiresConfirmation: true,
       requiresBookerEmailVerification: true,
       recurringEvent: true,
@@ -97,10 +106,17 @@ export default async function getEventTypeById({
       slotInterval: true,
       hashedLink: true,
       bookingLimits: true,
+      onlyShowFirstAvailableSlot: true,
       durationLimits: true,
+      assignAllTeamMembers: true,
       successRedirectUrl: true,
       currency: true,
       bookingFields: true,
+      owner: {
+        select: {
+          id: true,
+        },
+      },
       parent: {
         select: {
           teamId: true,
@@ -113,6 +129,11 @@ export default async function getEventTypeById({
           name: true,
           slug: true,
           parentId: true,
+          parent: {
+            select: {
+              slug: true,
+            },
+          },
           members: {
             select: {
               role: true,
@@ -145,6 +166,7 @@ export default async function getEventTypeById({
         select: {
           isFixed: true,
           userId: true,
+          priority: true,
         },
       },
       userId: true,
@@ -153,6 +175,7 @@ export default async function getEventTypeById({
         select: {
           owner: {
             select: {
+              avatarUrl: true,
               name: true,
               username: true,
               email: true,
@@ -166,6 +189,7 @@ export default async function getEventTypeById({
       destinationCalendar: true,
       seatsPerTimeSlot: true,
       seatsShowAttendees: true,
+      seatsShowAvailabilityCount: true,
       webhooks: {
         select: {
           id: true,
@@ -221,43 +245,43 @@ export default async function getEventTypeById({
     }
   }
 
-  const credentials = await prisma.credential.findMany({
-    where: {
-      userId,
-      app: {
-        enabled: true,
-        categories: {
-          hasSome: [AppCategories.conferencing, AppCategories.video],
-        },
-      },
-    },
-    select: {
-      id: true,
-      type: true,
-      key: true,
-      userId: true,
-      teamId: true,
-      appId: true,
-      invalid: true,
-    },
-  });
-
   const { locations, metadata, ...restEventType } = rawEventType;
   const newMetadata = EventTypeMetaDataSchema.parse(metadata || {}) || {};
   const apps = newMetadata?.apps || {};
   const eventTypeWithParsedMetadata = { ...rawEventType, metadata: newMetadata };
-  const stripeMetaData = getPaymentAppData(eventTypeWithParsedMetadata, true);
+  const eventTeamMembershipsWithUserProfile = [];
+  for (const eventTeamMembership of rawEventType.team?.members || []) {
+    eventTeamMembershipsWithUserProfile.push({
+      ...eventTeamMembership,
+      user: await UserRepository.enrichUserWithItsProfile({
+        user: eventTeamMembership.user,
+      }),
+    });
+  }
+
+  const childrenWithUserProfile = [];
+  for (const child of rawEventType.children || []) {
+    childrenWithUserProfile.push({
+      ...child,
+      owner: child.owner
+        ? await UserRepository.enrichUserWithItsProfile({
+            user: child.owner,
+          })
+        : null,
+    });
+  }
+
+  const eventTypeUsersWithUserProfile = [];
+  for (const eventTypeUser of rawEventType.users) {
+    eventTypeUsersWithUserProfile.push(
+      await UserRepository.enrichUserWithItsProfile({
+        user: eventTypeUser,
+      })
+    );
+  }
+
   newMetadata.apps = {
     ...apps,
-    stripe: {
-      ...stripeMetaData,
-      paymentOption: stripeMetaData.paymentOption as string,
-      currency:
-        (
-          credentials.find((integration) => integration.type === "stripe_payment")
-            ?.key as unknown as StripeData
-        )?.default_currency || "usd",
-    },
     giphy: getEventTypeAppData(eventTypeWithParsedMetadata, "giphy", true),
   };
 
@@ -276,12 +300,18 @@ export default async function getEventTypeById({
     metadata: parsedMetaData,
     customInputs: parsedCustomInputs,
     users: rawEventType.users,
-    children: restEventType.children.flatMap((ch) =>
+    bookerUrl: restEventType.team
+      ? await getBookerBaseUrl(restEventType.team.parentId)
+      : restEventType.owner
+      ? await getBookerBaseUrl(currentOrganizationId)
+      : WEBSITE_URL,
+    children: childrenWithUserProfile.flatMap((ch) =>
       ch.owner !== null
         ? {
             ...ch,
             owner: {
               ...ch.owner,
+              avatar: getUserAvatarUrl(ch.owner),
               email: ch.owner.email,
               name: ch.owner.name ?? "",
               username: ch.owner.username ?? "",
@@ -316,12 +346,11 @@ export default async function getEventTypeById({
     eventType.users.push(fallbackUser);
   }
 
-  const eventTypeUsers: ((typeof eventType.users)[number] & { avatar: string })[] = eventType.users.map(
-    (user) => ({
+  const eventTypeUsers: ((typeof eventType.users)[number] & { avatar: string })[] =
+    eventTypeUsersWithUserProfile.map((user) => ({
       ...user,
-      avatar: `${CAL_URL}/${user.username}/avatar.png`,
-    })
-  );
+      avatar: getUserAvatarUrl(user),
+    }));
 
   const currentUser = eventType.users.find((u) => u.id === userId);
 
@@ -360,15 +389,16 @@ export default async function getEventTypeById({
 
   const isOrgEventType = !!eventTypeObject.team?.parentId;
   const teamMembers = eventTypeObject.team
-    ? eventTypeObject.team.members
+    ? eventTeamMembershipsWithUserProfile
         .filter((member) => member.accepted || isOrgEventType)
         .map((member) => {
           const user: typeof member.user & { avatar: string } = {
             ...member.user,
-            avatar: `${CAL_URL}/${member.user.username}/avatar.png`,
+            avatar: getUserAvatarUrl(member.user),
           };
           return {
             ...user,
+            profileId: user.profile.id,
             eventTypes: user.eventTypes.map((evTy) => evTy.slug),
             membership: member.role,
           };
@@ -396,6 +426,7 @@ export default async function getEventTypeById({
     team: eventTypeObject.team || null,
     teamMembers,
     currentUserMembership,
+    isUserOrganizationAdmin,
   };
   return finalObj;
 }

@@ -20,7 +20,11 @@ export const eventOwnerProcedure = authedProcedure
     const event = await ctx.prisma.eventType.findUnique({
       where: { id: input.id },
       include: {
-        users: true,
+        users: {
+          select: {
+            id: true,
+          },
+        },
         team: {
           select: {
             members: {
@@ -40,10 +44,13 @@ export const eventOwnerProcedure = authedProcedure
 
     const isAuthorized = (function () {
       if (event.team) {
-        return event.team.members
-          .filter((member) => member.role === MembershipRole.OWNER || member.role === MembershipRole.ADMIN)
-          .map((member) => member.userId)
-          .includes(ctx.user.id);
+        const isOrgAdmin = !!ctx.user?.organization?.isOrgAdmin;
+        return (
+          event.team.members
+            .filter((member) => member.role === MembershipRole.OWNER || member.role === MembershipRole.ADMIN)
+            .map((member) => member.userId)
+            .includes(ctx.user.id) || isOrgAdmin
+        );
       }
       return event.userId === ctx.user.id || event.users.find((user) => user.id === ctx.user.id);
     })();

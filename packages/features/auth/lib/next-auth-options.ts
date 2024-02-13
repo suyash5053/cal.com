@@ -1,5 +1,6 @@
-import type { UserPermissionRole, Membership, Team } from "@prisma/client";
+import type { Membership, Team, UserPermissionRole } from "@prisma/client";
 import type { AuthOptions, Session } from "next-auth";
+import type { JWT } from "next-auth/jwt";
 import { encode } from "next-auth/jwt";
 import type { Provider } from "next-auth/providers";
 import CredentialsProvider from "next-auth/providers/credentials";
@@ -8,16 +9,21 @@ import GoogleProvider from "next-auth/providers/google";
 
 import checkLicense from "@calcom/features/ee/common/server/checkLicense";
 import ImpersonationProvider from "@calcom/features/ee/impersonation/lib/ImpersonationProvider";
+import { getOrgFullOrigin, subdomainSuffix } from "@calcom/features/ee/organizations/lib/orgDomains";
 import { clientSecretVerifier, hostedCal, isSAMLLoginEnabled } from "@calcom/features/ee/sso/lib/saml";
 import { checkRateLimitAndThrowError } from "@calcom/lib/checkRateLimitAndThrowError";
-import { IS_TEAM_BILLING_ENABLED, WEBAPP_URL } from "@calcom/lib/constants";
-import { symmetricDecrypt } from "@calcom/lib/crypto";
+import { ENABLE_PROFILE_SWITCHER, IS_TEAM_BILLING_ENABLED, WEBAPP_URL } from "@calcom/lib/constants";
+import { symmetricDecrypt, symmetricEncrypt } from "@calcom/lib/crypto";
 import { defaultCookies } from "@calcom/lib/default-cookies";
 import { isENVDev } from "@calcom/lib/env";
+import logger from "@calcom/lib/logger";
 import { randomString } from "@calcom/lib/random";
+import { safeStringify } from "@calcom/lib/safeStringify";
+import { ProfileRepository } from "@calcom/lib/server/repository/profile";
+import { UserRepository } from "@calcom/lib/server/repository/user";
 import slugify from "@calcom/lib/slugify";
 import prisma from "@calcom/prisma";
-import { IdentityProvider } from "@calcom/prisma/enums";
+import { IdentityProvider, MembershipRole } from "@calcom/prisma/enums";
 import { teamMetadataSchema, userMetadata } from "@calcom/prisma/zod-utils";
 
 import { ErrorCode } from "./ErrorCode";
@@ -25,20 +31,23 @@ import { isPasswordValid } from "./isPasswordValid";
 import CalComAdapter from "./next-auth-custom-adapter";
 import { verifyPassword } from "./verifyPassword";
 
+const log = logger.getSubLogger({ prefix: ["next-auth-options"] });
 const GOOGLE_API_CREDENTIALS = process.env.GOOGLE_API_CREDENTIALS || "{}";
 const { client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET } =
   JSON.parse(GOOGLE_API_CREDENTIALS)?.web || {};
 const GOOGLE_LOGIN_ENABLED = process.env.GOOGLE_LOGIN_ENABLED === "true";
 const IS_GOOGLE_LOGIN_ENABLED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_LOGIN_ENABLED);
+const ORGANIZATIONS_AUTOLINK =
+  process.env.ORGANIZATIONS_AUTOLINK === "1" || process.env.ORGANIZATIONS_AUTOLINK === "true";
 
-const usernameSlug = (username: string) => slugify(username) + "-" + randomString(6).toLowerCase();
+const usernameSlug = (username: string) => `${slugify(username)}-${randomString(6).toLowerCase()}`;
 
-const loginWithTotp = async (user: { email: string }) =>
-  `/auth/login?totp=${await (await import("./signJwt")).default({ email: user.email })}`;
+const loginWithTotp = async (email: string) =>
+  `/auth/login?totp=${await (await import("./signJwt")).default({ email })}`;
 
 type UserTeams = {
   teams: (Membership & {
-    team: Team;
+    team: Pick<Team, "metadata">;
   })[];
 };
 
@@ -53,6 +62,33 @@ export const checkIfUserBelongsToActiveTeam = <T extends UserTeams>(user: T) =>
     return metadata.success && metadata.data?.subscriptionId;
   });
 
+const checkIfUserShouldBelongToOrg = async (idP: IdentityProvider, email: string) => {
+  const [orgUsername, apexDomain] = email.split("@");
+  if (!ORGANIZATIONS_AUTOLINK || idP !== "GOOGLE") return { orgUsername, orgId: undefined };
+  const existingOrg = await prisma.team.findFirst({
+    where: {
+      AND: [
+        {
+          metadata: {
+            path: ["isOrganizationVerified"],
+            equals: true,
+          },
+        },
+        {
+          metadata: {
+            path: ["orgAutoAcceptEmail"],
+            equals: apexDomain,
+          },
+        },
+      ],
+    },
+    select: {
+      id: true,
+    },
+  });
+  return { orgUsername, orgId: existingOrg?.id };
+};
+
 const providers: Provider[] = [
   CredentialsProvider({
     id: "credentials",
@@ -62,6 +98,7 @@ const providers: Provider[] = [
       email: { label: "Email Address", type: "email", placeholder: "john.doe@example.com" },
       password: { label: "Password", type: "password", placeholder: "Your super secure password" },
       totpCode: { label: "Two-factor Code", type: "input", placeholder: "Code from authenticator app" },
+      backupCode: { label: "Backup Code", type: "input", placeholder: "Two-factor backup code" },
     },
     async authorize(credentials) {
       if (!credentials) {
@@ -69,38 +106,17 @@ const providers: Provider[] = [
         throw new Error(ErrorCode.InternalServerError);
       }
 
-      const user = await prisma.user.findUnique({
-        where: {
-          email: credentials.email.toLowerCase(),
-        },
-        select: {
-          role: true,
-          id: true,
-          username: true,
-          name: true,
-          email: true,
-          metadata: true,
-          identityProvider: true,
-          password: true,
-          organizationId: true,
-          twoFactorEnabled: true,
-          twoFactorSecret: true,
-          organization: {
-            select: {
-              id: true,
-            },
-          },
-          teams: {
-            include: {
-              team: true,
-            },
-          },
-        },
+      const user = await UserRepository.findByEmailAndIncludeProfilesAndPassword({
+        email: credentials.email,
       });
-
       // Don't leak information about it being username or password that is invalid
       if (!user) {
         throw new Error(ErrorCode.IncorrectEmailPassword);
+      }
+
+      // Locked users cannot login
+      if (user.locked) {
+        throw new Error(ErrorCode.UserAccountLocked);
       }
 
       await checkRateLimitAndThrowError({
@@ -110,22 +126,50 @@ const providers: Provider[] = [
       if (user.identityProvider !== IdentityProvider.CAL && !credentials.totpCode) {
         throw new Error(ErrorCode.ThirdPartyIdentityProviderEnabled);
       }
-
-      if (!user.password && user.identityProvider !== IdentityProvider.CAL && !credentials.totpCode) {
+      if (!user.password?.hash && user.identityProvider == IdentityProvider.CAL) {
+        throw new Error(ErrorCode.IncorrectEmailPassword);
+      }
+      if (!user.password?.hash && user.identityProvider !== IdentityProvider.CAL && !credentials.totpCode) {
         throw new Error(ErrorCode.IncorrectEmailPassword);
       }
 
-      if (user.password && !credentials.totpCode) {
-        if (!user.password) {
+      if (user.password?.hash && !credentials.totpCode) {
+        if (!user.password?.hash) {
           throw new Error(ErrorCode.IncorrectEmailPassword);
         }
-        const isCorrectPassword = await verifyPassword(credentials.password, user.password);
+        const isCorrectPassword = await verifyPassword(credentials.password, user.password.hash);
         if (!isCorrectPassword) {
           throw new Error(ErrorCode.IncorrectEmailPassword);
         }
       }
 
-      if (user.twoFactorEnabled) {
+      if (user.twoFactorEnabled && credentials.backupCode) {
+        if (!process.env.CALENDSO_ENCRYPTION_KEY) {
+          console.error("Missing encryption key; cannot proceed with backup code login.");
+          throw new Error(ErrorCode.InternalServerError);
+        }
+
+        if (!user.backupCodes) throw new Error(ErrorCode.MissingBackupCodes);
+
+        const backupCodes = JSON.parse(
+          symmetricDecrypt(user.backupCodes, process.env.CALENDSO_ENCRYPTION_KEY)
+        );
+
+        // check if user-supplied code matches one
+        const index = backupCodes.indexOf(credentials.backupCode.replaceAll("-", ""));
+        if (index === -1) throw new Error(ErrorCode.IncorrectBackupCode);
+
+        // delete verified backup code and re-encrypt remaining
+        backupCodes[index] = null;
+        await prisma.user.update({
+          where: {
+            id: user.id,
+          },
+          data: {
+            backupCodes: symmetricEncrypt(JSON.stringify(backupCodes), process.env.CALENDSO_ENCRYPTION_KEY),
+          },
+        });
+      } else if (user.twoFactorEnabled) {
         if (!credentials.totpCode) {
           throw new Error(ErrorCode.SecondFactorRequired);
         }
@@ -148,7 +192,10 @@ const providers: Provider[] = [
           throw new Error(ErrorCode.InternalServerError);
         }
 
-        const isValidToken = (await import("otplib")).authenticator.check(credentials.totpCode, secret);
+        const isValidToken = (await import("@calcom/lib/totp")).totpAuthenticatorCheck(
+          credentials.totpCode,
+          secret
+        );
         if (!isValidToken) {
           throw new Error(ErrorCode.IncorrectTwoFactorCode);
         }
@@ -162,6 +209,12 @@ const providers: Provider[] = [
         if (role !== "ADMIN") return role;
         // User's identity provider is not "CAL"
         if (user.identityProvider !== IdentityProvider.CAL) return role;
+
+        if (process.env.NEXT_PUBLIC_IS_E2E) {
+          console.warn("E2E testing is enabled, skipping password and 2FA requirements for Admin");
+          return role;
+        }
+
         // User's password is valid and two-factor authentication is enabled
         if (isPasswordValid(credentials.password, false, true) && user.twoFactorEnabled) return role;
         // Code is running in a development environment
@@ -177,7 +230,8 @@ const providers: Provider[] = [
         name: user.name,
         role: validateRole(user.role),
         belongsToActiveTeam: hasActiveTeams,
-        organizationId: user.organizationId,
+        locale: user.locale,
+        profile: user.allProfiles[0],
       };
     },
   }),
@@ -214,14 +268,30 @@ if (isSAMLLoginEnabled) {
       params: { grant_type: "authorization_code" },
     },
     userinfo: `${WEBAPP_URL}/api/auth/saml/userinfo`,
-    profile: (profile) => {
+    profile: async (profile: {
+      id?: number;
+      firstName?: string;
+      lastName?: string;
+      email?: string;
+      locale?: string;
+    }) => {
+      const user = await UserRepository.findByEmailAndIncludeProfilesAndPassword({
+        email: profile.email || "",
+      });
+      if (!user) {
+        throw new Error(ErrorCode.UserNotFound);
+      }
+
+      const [userProfile] = user.allProfiles;
       return {
-        id: profile.id || "",
+        id: profile.id || 0,
         firstName: profile.firstName || "",
         lastName: profile.lastName || "",
         email: profile.email || "",
         name: `${profile.firstName || ""} ${profile.lastName || ""}`.trim(),
         email_verified: true,
+        locale: profile.locale,
+        profile: userProfile,
       };
     },
     options: {
@@ -273,6 +343,12 @@ if (isSAMLLoginEnabled) {
         }
 
         const { id, firstName, lastName, email } = userInfo;
+        const user = await UserRepository.findByEmailAndIncludeProfilesAndPassword({ email });
+        if (!user) {
+          throw new Error(ErrorCode.UserNotFound);
+        }
+
+        const [profile] = user.allProfiles;
 
         return {
           id: id as unknown as number,
@@ -281,6 +357,7 @@ if (isSAMLLoginEnabled) {
           email,
           name: `${firstName} ${lastName}`.trim(),
           email_verified: true,
+          profile,
         };
       },
     })
@@ -349,14 +426,31 @@ export const AUTH_OPTIONS: AuthOptions = {
   },
   providers,
   callbacks: {
-    async jwt({ token, user, account, trigger, session }) {
+    async jwt({
+      // Always available but with a little difference in value
+      token,
+      // Available only in case of signIn, signUp or useSession().update call.
+      trigger,
+      // Available when useSession().update is called. The value will be the POST data
+      session,
+      // Available only in the first call once the user signs in. Not available in subsequent calls
+      user,
+      // Available only in the first call once the user signs in. Not available in subsequent calls
+      account,
+    }) {
+      log.debug("callbacks:jwt", safeStringify({ token, user, account, trigger, session }));
+
+      // The data available in 'session' depends on what data was supplied in update method call of session
       if (trigger === "update") {
         return {
           ...token,
+          profileId: session?.profileId ?? token.profileId ?? null,
+          upId: session?.upId ?? token.upId ?? null,
+          locale: session?.locale ?? token.locale ?? "en",
           name: session?.name ?? token.name,
           username: session?.username ?? token.username,
           email: session?.email ?? token.email,
-        };
+        } as JWT;
       }
       const autoMergeIdentities = async () => {
         const existingUser = await prisma.user.findFirst({
@@ -367,8 +461,9 @@ export const AUTH_OPTIONS: AuthOptions = {
             username: true,
             name: true,
             email: true,
-            organizationId: true,
             role: true,
+            locale: true,
+            movedToProfileId: true,
             teams: {
               include: {
                 team: true,
@@ -383,13 +478,41 @@ export const AUTH_OPTIONS: AuthOptions = {
 
         // Check if the existingUser has any active teams
         const belongsToActiveTeam = checkIfUserBelongsToActiveTeam(existingUser);
-        const { teams, ...existingUserWithoutTeamsField } = existingUser;
+        const { teams: _teams, ...existingUserWithoutTeamsField } = existingUser;
+        const allProfiles = await ProfileRepository.findAllProfilesForUserIncludingMovedUser(existingUser);
+        log.debug(
+          "callbacks:jwt:autoMergeIdentities",
+          safeStringify({
+            allProfiles,
+          })
+        );
+        const { upId } = determineProfile({ profiles: allProfiles, token });
+
+        const profile = await ProfileRepository.findByUpId(upId);
+        if (!profile) {
+          throw new Error("Profile not found");
+        }
+
+        const profileOrg = profile?.organization;
 
         return {
           ...existingUserWithoutTeamsField,
           ...token,
+          profileId: profile.id,
+          upId,
           belongsToActiveTeam,
-        };
+          // All organizations in the token would be too big to store. It breaks the sessions request.
+          // So, we just set the currently switched organization only here.
+          org: profileOrg
+            ? {
+                id: profileOrg.id,
+                name: profileOrg.name,
+                slug: profileOrg.slug ?? profileOrg.requestedSlug ?? "",
+                fullDomain: getOrgFullOrigin(profileOrg.slug ?? profileOrg.requestedSlug ?? ""),
+                domainSuffix: subdomainSuffix(),
+              }
+            : null,
+        } as JWT;
       };
       if (!user) {
         return await autoMergeIdentities();
@@ -410,10 +533,13 @@ export const AUTH_OPTIONS: AuthOptions = {
           username: user.username,
           email: user.email,
           role: user.role,
-          impersonatedByUID: user?.impersonatedByUID,
+          impersonatedBy: user.impersonatedBy,
           belongsToActiveTeam: user?.belongsToActiveTeam,
-          organizationId: user?.organizationId,
-        };
+          org: user?.org,
+          locale: user?.locale,
+          profileId: user.profile?.id ?? token.profileId ?? null,
+          upId: user.profile?.upId ?? token.upId ?? null,
+        } as JWT;
       }
 
       // The arguments above are from the provider so we need to look up the
@@ -448,18 +574,27 @@ export const AUTH_OPTIONS: AuthOptions = {
           username: existingUser.username,
           email: existingUser.email,
           role: existingUser.role,
-          impersonatedByUID: token.impersonatedByUID as number,
+          impersonatedBy: token.impersonatedBy,
           belongsToActiveTeam: token?.belongsToActiveTeam as boolean,
-          organizationId: token?.organizationId,
-        };
+          org: token?.org,
+          locale: existingUser.locale,
+        } as JWT;
+      }
+
+      if (account.type === "email") {
+        return await autoMergeIdentities();
       }
 
       return token;
     },
-    async session({ session, token }) {
+    async session({ session, token, user }) {
+      log.debug("callbacks:session - Session callback called", safeStringify({ session, token, user }));
       const hasValidLicense = await checkLicense(prisma);
+      const profileId = token.profileId;
       const calendsoSession: Session = {
         ...session,
+        profileId,
+        upId: token.upId || session.upId,
         hasValidLicense,
         user: {
           ...session.user,
@@ -467,15 +602,28 @@ export const AUTH_OPTIONS: AuthOptions = {
           name: token.name,
           username: token.username as string,
           role: token.role as UserPermissionRole,
-          impersonatedByUID: token.impersonatedByUID as number,
+          impersonatedBy: token.impersonatedBy,
           belongsToActiveTeam: token?.belongsToActiveTeam as boolean,
-          organizationId: token?.organizationId,
+          org: token?.org,
+          locale: token.locale,
         },
       };
       return calendsoSession;
     },
     async signIn(params) {
-      const { user, account, profile } = params;
+      const {
+        /**
+         * Available when Credentials provider is used - Has the value returned by authorize callback
+         */
+        user,
+        /**
+         * Available when Credentials provider is used - Has the value submitted as the body of the HTTP POST submission
+         */
+        profile,
+        account,
+      } = params;
+
+      log.debug("callbacks:signin", safeStringify(params));
 
       if (account?.provider === "email") {
         return true;
@@ -569,7 +717,7 @@ export const AUTH_OPTIONS: AuthOptions = {
               }
             }
             if (existingUser.twoFactorEnabled && existingUser.identityProvider === idP) {
-              return loginWithTotp(existingUser);
+              return loginWithTotp(existingUser.email);
             } else {
               return true;
             }
@@ -585,7 +733,7 @@ export const AUTH_OPTIONS: AuthOptions = {
           if (!userWithNewEmail) {
             await prisma.user.update({ where: { id: existingUser.id }, data: { email: user.email } });
             if (existingUser.twoFactorEnabled) {
-              return loginWithTotp(existingUser);
+              return loginWithTotp(existingUser.email);
             } else {
               return true;
             }
@@ -604,6 +752,9 @@ export const AUTH_OPTIONS: AuthOptions = {
               mode: "insensitive",
             },
           },
+          include: {
+            password: true,
+          },
         });
 
         if (existingUserWithEmail) {
@@ -614,7 +765,7 @@ export const AUTH_OPTIONS: AuthOptions = {
             existingUserWithEmail.identityProvider !== IdentityProvider.CAL
           ) {
             if (existingUserWithEmail.twoFactorEnabled) {
-              return loginWithTotp(existingUserWithEmail);
+              return loginWithTotp(existingUserWithEmail.email);
             } else {
               return true;
             }
@@ -622,7 +773,7 @@ export const AUTH_OPTIONS: AuthOptions = {
 
           // check if user was invited
           if (
-            !existingUserWithEmail.password &&
+            !existingUserWithEmail.password?.hash &&
             !existingUserWithEmail.emailVerified &&
             !existingUserWithEmail.username
           ) {
@@ -644,7 +795,7 @@ export const AUTH_OPTIONS: AuthOptions = {
             });
 
             if (existingUserWithEmail.twoFactorEnabled) {
-              return loginWithTotp(existingUserWithEmail);
+              return loginWithTotp(existingUserWithEmail.email);
             } else {
               return true;
             }
@@ -659,14 +810,16 @@ export const AUTH_OPTIONS: AuthOptions = {
               where: { email: existingUserWithEmail.email },
               // also update email to the IdP email
               data: {
-                password: null,
+                password: {
+                  delete: true,
+                },
                 email: user.email,
                 identityProvider: idP,
                 identityProviderId: account.providerAccountId,
               },
             });
             if (existingUserWithEmail.twoFactorEnabled) {
-              return loginWithTotp(existingUserWithEmail);
+              return loginWithTotp(existingUserWithEmail.email);
             } else {
               return true;
             }
@@ -677,16 +830,27 @@ export const AUTH_OPTIONS: AuthOptions = {
           return "/auth/error?error=use-identity-login";
         }
 
+        // Associate with organization if enabled by flag and idP is Google (for now)
+        const { orgUsername, orgId } = await checkIfUserShouldBelongToOrg(idP, user.email);
+
         const newUser = await prisma.user.create({
           data: {
             // Slugify the incoming name and append a few random characters to
             // prevent conflicts for users with the same name.
-            username: usernameSlug(user.name),
+            username: orgId ? slugify(orgUsername) : usernameSlug(user.name),
             emailVerified: new Date(Date.now()),
             name: user.name,
+            ...(user.image && { avatarUrl: user.image }),
             email: user.email,
             identityProvider: idP,
             identityProviderId: account.providerAccountId,
+            ...(orgId && {
+              verified: true,
+              organization: { connect: { id: orgId } },
+              teams: {
+                create: { role: MembershipRole.MEMBER, accepted: true, team: { connect: { id: orgId } } },
+              },
+            }),
           },
         });
 
@@ -694,7 +858,7 @@ export const AUTH_OPTIONS: AuthOptions = {
         await calcomAdapter.linkAccount(linkAccountNewUserData);
 
         if (account.twoFactorEnabled) {
-          return loginWithTotp(newUser);
+          return loginWithTotp(newUser.email);
         } else {
           return true;
         }
@@ -702,6 +866,9 @@ export const AUTH_OPTIONS: AuthOptions = {
 
       return false;
     },
+    /**
+     * Used to handle the navigation right after successful login or logout
+     */
     async redirect({ url, baseUrl }) {
       // Allows relative callback URLs
       if (url.startsWith("/")) return `${baseUrl}${url}`;
@@ -710,4 +877,28 @@ export const AUTH_OPTIONS: AuthOptions = {
       return baseUrl;
     },
   },
+};
+
+/**
+ * Identifies the profile the user should be logged into.
+ */
+const determineProfile = ({
+  token,
+  profiles,
+}: {
+  token: JWT;
+  profiles: { id: number | null; upId: string }[];
+}) => {
+  // If profile switcher is disabled, we can only show the first profile.
+  if (!ENABLE_PROFILE_SWITCHER) {
+    return profiles[0];
+  }
+
+  if (token.upId) {
+    // Otherwise use what's in the token
+    return { profileId: token.profileId, upId: token.upId as string };
+  }
+
+  // If there is just one profile it has to be the one we want to log into.
+  return profiles[0];
 };

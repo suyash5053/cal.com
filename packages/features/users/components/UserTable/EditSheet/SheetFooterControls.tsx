@@ -7,7 +7,7 @@ import { useEditMode } from "./store";
 function EditModeFooter() {
   const { t } = useLocale();
   const setEditMode = useEditMode((state) => state.setEditMode);
-  const isLoading = useEditMode((state) => state.mutationLoading);
+  const isPending = useEditMode((state) => state.mutationLoading);
 
   return (
     <>
@@ -21,7 +21,7 @@ function EditModeFooter() {
         {t("cancel")}
       </Button>
 
-      <Button type="submit" className="w-full justify-center" form="edit-user-form" loading={isLoading}>
+      <Button type="submit" className="w-full justify-center" form="edit-user-form" loading={isPending}>
         {t("update")}
       </Button>
     </>
@@ -35,7 +35,7 @@ function MoreInfoFooter() {
   return (
     <>
       <SheetClose asChild>
-        <Button color="secondary" type="button" className="justify-center md:w-1/5">
+        <Button color="secondary" type="button" className="w-full justify-center lg:w-1/5">
           {t("close")}
         </Button>
       </SheetClose>

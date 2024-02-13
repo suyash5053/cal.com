@@ -4,23 +4,32 @@ import { shallow } from "zustand/shallow";
 
 import { useEmbedUiConfig, useIsEmbed } from "@calcom/embed-core/embed-iframe";
 import { EventDetails, EventMembers, EventMetaSkeleton, EventTitle } from "@calcom/features/bookings";
+import { SeatsAvailabilityText } from "@calcom/features/bookings/components/SeatsAvailabilityText";
 import { EventMetaBlock } from "@calcom/features/bookings/components/event-meta/Details";
 import { useTimePreferences } from "@calcom/features/bookings/lib";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
-import { markdownToSafeHTML } from "@calcom/lib/markdownToSafeHTML";
 import { Calendar, Globe, User } from "@calcom/ui/components/icon";
 
 import { fadeInUp } from "../config";
 import { useBookerStore } from "../store";
 import { FromToTime } from "../utils/dates";
-import { useEvent } from "../utils/event";
+import type { useEventReturnType } from "../utils/event";
 
-const TimezoneSelect = dynamic(() => import("@calcom/ui").then((mod) => mod.TimezoneSelect), {
-  ssr: false,
-});
+const TimezoneSelect = dynamic(
+  () => import("@calcom/ui/components/form/timezone-select/TimezoneSelect").then((mod) => mod.TimezoneSelect),
+  {
+    ssr: false,
+  }
+);
 
-export const EventMeta = () => {
-  const { timezone, setTimezone, timeFormat } = useTimePreferences();
+export const EventMeta = ({
+  event,
+  isPending,
+}: {
+  event: useEventReturnType["data"];
+  isPending: useEventReturnType["isPending"];
+}) => {
+  const { setTimezone, timeFormat, timezone } = useTimePreferences();
   const selectedDuration = useBookerStore((state) => state.selectedDuration);
   const selectedTimeslot = useBookerStore((state) => state.selectedTimeslot);
   const bookerState = useBookerStore((state) => state.state);
@@ -31,7 +40,6 @@ export const EventMeta = () => {
     shallow
   );
   const { i18n, t } = useLocale();
-  const { data: event, isLoading } = useEvent();
   const embedUiConfig = useEmbedUiConfig();
   const isEmbed = useIsEmbed();
   const hideEventTypeDetails = isEmbed ? embedUiConfig.hideEventTypeDetails : false;
@@ -56,19 +64,24 @@ export const EventMeta = () => {
     : "text-bookinghighlight";
 
   return (
-    <div className="relative z-10 p-6">
-      {isLoading && (
+    <div className="relative z-10 p-6" data-testid="event-meta">
+      {isPending && (
         <m.div {...fadeInUp} initial="visible" layout>
           <EventMetaSkeleton />
         </m.div>
       )}
-      {!isLoading && !!event && (
+      {!isPending && !!event && (
         <m.div {...fadeInUp} layout transition={{ ...fadeInUp.transition, delay: 0.3 }}>
-          <EventMembers schedulingType={event.schedulingType} users={event.users} profile={event.profile} />
+          <EventMembers
+            schedulingType={event.schedulingType}
+            users={event.users}
+            profile={event.profile}
+            entity={event.entity}
+          />
           <EventTitle className="my-2">{event?.title}</EventTitle>
           {event.description && (
             <EventMetaBlock contentClassName="mb-8 break-words max-w-full max-h-[180px] scroll-bar pr-4">
-              <div dangerouslySetInnerHTML={{ __html: markdownToSafeHTML(event.description) }} />
+              <div dangerouslySetInnerHTML={{ __html: event.description }} />
             </EventMetaBlock>
           )}
           <div className="space-y-4 font-medium rtl:-mr-2">
@@ -99,6 +112,7 @@ export const EventMeta = () => {
               </EventMetaBlock>
             )}
             <EventDetails event={event} />
+
             <EventMetaBlock
               className="cursor-pointer [&_.current-timezone:before]:focus-within:opacity-100 [&_.current-timezone:before]:hover:opacity-100"
               contentClassName="relative max-w-[90%]"
@@ -106,7 +120,10 @@ export const EventMeta = () => {
               {bookerState === "booking" ? (
                 <>{timezone}</>
               ) : (
-                <span className="min-w-32 current-timezone before:bg-subtle -mt-[2px] flex h-6 max-w-full items-center justify-start before:absolute before:inset-0 before:bottom-[-3px] before:left-[-30px] before:top-[-3px] before:w-[calc(100%_+_35px)] before:rounded-md before:py-3 before:opacity-0 before:transition-opacity">
+                <span
+                  className={`min-w-32 current-timezone before:bg-subtle -mt-[2px] flex h-6 max-w-full items-center justify-start before:absolute before:inset-0 before:bottom-[-3px] before:left-[-30px] before:top-[-3px] before:w-[calc(100%_+_35px)] before:rounded-md before:py-3 before:opacity-0 before:transition-opacity ${
+                    event.lockTimeZoneToggleOnBookingPage ? "cursor-not-allowed" : ""
+                  }`}>
                   <TimezoneSelect
                     menuPosition="fixed"
                     classNames={{
@@ -118,6 +135,7 @@ export const EventMeta = () => {
                     }}
                     value={timezone}
                     onChange={(tz) => setTimezone(tz.value)}
+                    isDisabled={event.lockTimeZoneToggleOnBookingPage}
                   />
                 </span>
               )}
@@ -126,13 +144,12 @@ export const EventMeta = () => {
               <EventMetaBlock icon={User} className={`${colorClass}`}>
                 <div className="text-bookinghighlight flex items-start text-sm">
                   <p>
-                    {bookingSeatAttendeesQty ? eventTotalSeats - bookingSeatAttendeesQty : eventTotalSeats} /{" "}
-                    {eventTotalSeats}{" "}
-                    {t("seats_available", {
-                      count: bookingSeatAttendeesQty
-                        ? eventTotalSeats - bookingSeatAttendeesQty
-                        : eventTotalSeats,
-                    })}
+                    <SeatsAvailabilityText
+                      showExact={!!seatedEventData.showAvailableSeatsCount}
+                      totalSeats={eventTotalSeats}
+                      bookedSeats={bookingSeatAttendeesQty || 0}
+                      variant="fraction"
+                    />
                   </p>
                 </div>
               </EventMetaBlock>
